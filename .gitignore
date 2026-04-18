@@ -15,6 +15,7 @@ outputs/
 models
 *.pkl
 *.lock
+!uv.lock
 *cache*
 temp*
 slurm_logs/*
@@ -23,6 +24,27 @@ tmp/*
 # Development
 datasets/*
 !datasets/dataset.py
+!datasets/mlsys26-contest/
+datasets/mlsys26-contest/*
+!datasets/mlsys26-contest/definitions/
+datasets/mlsys26-contest/definitions/*
+!datasets/mlsys26-contest/definitions/dsa_paged/
+datasets/mlsys26-contest/definitions/dsa_paged/*
+!datasets/mlsys26-contest/definitions/dsa_paged/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1.json
+!datasets/mlsys26-contest/workloads/
+datasets/mlsys26-contest/workloads/*
+!datasets/mlsys26-contest/workloads/dsa_paged/
+datasets/mlsys26-contest/workloads/dsa_paged/*
+!datasets/mlsys26-contest/workloads/dsa_paged/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1.jsonl
+!datasets/mlsys26-contest/blob/
+datasets/mlsys26-contest/blob/*
+!datasets/mlsys26-contest/blob/workloads/
+datasets/mlsys26-contest/blob/workloads/*
+!datasets/mlsys26-contest/blob/workloads/dsa_paged/
+datasets/mlsys26-contest/blob/workloads/dsa_paged/*
+!datasets/mlsys26-contest/blob/workloads/dsa_paged/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/
+datasets/mlsys26-contest/blob/workloads/dsa_paged/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/*
+!datasets/mlsys26-contest/blob/workloads/dsa_paged/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1_mini_smoke.safetensors
 test.txt
 test_data/*
 *_old
