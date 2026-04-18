@@ -1,6 +1,11 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from agent.api import OPENROUTER_BASE_URL, create_inference_server
+from agent.api import (
+    OPENROUTER_BASE_URL,
+    InferenceServer,
+    create_inference_server,
+    query_inference_server,
+)
 from agent.eval import CUTE_DSL_DEPENDENCIES, eval_kernel
 from agent.main import build_parser
 from agent.utils import (
@@ -241,14 +246,76 @@ def test_openrouter_client_uses_openrouter_key_and_base_url(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    with patch("agent.api.openai.OpenAI") as openai_client:
+    with patch("agent.api._load_dotenv"), patch("agent.api.openai.OpenAI") as openai_client:
         server = create_inference_server("openrouter")
 
     assert server.api_type == "openrouter"
+    assert server.fallback_client is None
     openai_client.assert_called_once()
     kwargs = openai_client.call_args.kwargs
     assert kwargs["api_key"] == "test-key"
     assert str(kwargs["base_url"]).rstrip("/") == OPENROUTER_BASE_URL
+
+
+def test_query_falls_back_to_openai_on_openrouter_exhaustion():
+    primary = MagicMock()
+    exhaustion = Exception("insufficient credits on OpenRouter")
+    exhaustion.status_code = 402
+    primary.chat.completions.create.side_effect = exhaustion
+
+    fallback = MagicMock()
+    fallback_response = MagicMock()
+    fallback_response.choices = [MagicMock(message=MagicMock(content="fallback-text"))]
+    fallback.chat.completions.create.return_value = fallback_response
+
+    server = InferenceServer(
+        api_type="openrouter",
+        client=primary,
+        fallback_client=fallback,
+        fallback_model="gpt-4o",
+    )
+
+    result = query_inference_server(
+        server,
+        model_name="anthropic/claude-sonnet-4-5",
+        prompt="hi",
+        max_completion_tokens=8,
+        retry_times=1,
+    )
+
+    assert result == "fallback-text"
+    fallback.chat.completions.create.assert_called_once()
+    assert server._primary_exhausted is True
+
+    result_two = query_inference_server(
+        server,
+        model_name="anthropic/claude-sonnet-4-5",
+        prompt="again",
+        max_completion_tokens=8,
+        retry_times=1,
+    )
+    assert result_two == "fallback-text"
+    assert primary.chat.completions.create.call_count == 1
+    assert fallback.chat.completions.create.call_count == 2
+
+
+def test_openrouter_client_configures_openai_fallback(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini")
+
+    with patch("agent.api._load_dotenv"), patch("agent.api.openai.OpenAI") as openai_client:
+        server = create_inference_server("openrouter")
+
+    assert server.fallback_client is not None
+    assert server.fallback_model == "gpt-4o-mini"
+    assert openai_client.call_count == 2
+    primary_kwargs, fallback_kwargs = (
+        openai_client.call_args_list[0].kwargs,
+        openai_client.call_args_list[1].kwargs,
+    )
+    assert primary_kwargs["api_key"] == "router-key"
+    assert fallback_kwargs["api_key"] == "openai-key"
 
 
 def test_eval_kernel_builds_python_cute_solution(monkeypatch):
