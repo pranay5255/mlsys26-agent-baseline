@@ -30,13 +30,18 @@ def create_modal_app(gpu_type: str = "B200", debug: bool = False):
     """
     app = modal.App(MODAL_APP_NAME)
 
-    env = {"CUTE_DSL_CACHE_DIR": CUTE_CACHE_PATH}
+    env = {
+        "CUTE_DSL_CACHE_DIR": CUTE_CACHE_PATH,
+        "CUTE_DSL_LINEINFO": "1",
+        "CUTE_DSL_LOG_TO_CONSOLE": "1",
+        "CUTE_DSL_LOG_LEVEL": "20",
+    }
     if debug:
         env.update(
             {
                 "CUTE_DSL_LINEINFO": "1",
                 "CUTE_DSL_LOG_TO_CONSOLE": "1",
-                "CUTE_DSL_LOG_LEVEL": "20",
+                "CUTE_DSL_LOG_LEVEL": "10",
             }
         )
 
@@ -182,6 +187,45 @@ def create_modal_app(gpu_type: str = "B200", debug: bool = False):
 
         traces = result_ts.traces.get(task_id, [])
 
+        def summarize_traces(traces):
+            summaries = []
+            for idx, trace in enumerate(traces):
+                ev = getattr(trace, "evaluation", None)
+                if ev is None:
+                    summaries.append({"index": idx, "status": "NO_EVALUATION"})
+                    continue
+                status = getattr(getattr(ev, "status", None), "value", None) or str(
+                    getattr(ev, "status", "unknown")
+                )
+                log = getattr(ev, "log", None) or ""
+                entry = {
+                    "index": idx,
+                    "status": status,
+                    "log_length": len(log),
+                    "log_tail": log[-6000:],
+                }
+                performance = getattr(ev, "performance", None)
+                if performance is not None:
+                    entry["performance"] = {
+                        "latency_ms": getattr(performance, "latency_ms", None),
+                        "reference_latency_ms": getattr(
+                            performance, "reference_latency_ms", None
+                        ),
+                        "speedup_factor": getattr(performance, "speedup_factor", None),
+                    }
+                correctness = getattr(ev, "correctness", None)
+                if correctness is not None:
+                    entry["correctness"] = {
+                        "max_relative_error": getattr(
+                            correctness, "max_relative_error", None
+                        ),
+                        "max_absolute_error": getattr(
+                            correctness, "max_absolute_error", None
+                        ),
+                    }
+                summaries.append(entry)
+            return summaries
+
         error_statuses = {
             EvaluationStatus.COMPILE_ERROR,
             EvaluationStatus.RUNTIME_ERROR,
@@ -197,6 +241,7 @@ def create_modal_app(gpu_type: str = "B200", debug: bool = False):
                     "compiled": ev.status != EvaluationStatus.COMPILE_ERROR,
                     "task_id": task_id,
                     "error": f"{ev.status.value}: {ev.log}",
+                    "stats": {"trace_evaluations": summarize_traces(traces)},
                 }
 
         latencies, ref_latencies, speedups = [], [], []
@@ -211,7 +256,11 @@ def create_modal_app(gpu_type: str = "B200", debug: bool = False):
                 abs_errors.append(ev.correctness.max_absolute_error)
 
         if not latencies:
-            return {"task_id": task_id, "error": "No evaluation results"}
+            return {
+                "task_id": task_id,
+                "error": "No evaluation results",
+                "stats": {"trace_evaluations": summarize_traces(traces)},
+            }
 
         n = len(latencies)
         return {
@@ -225,6 +274,7 @@ def create_modal_app(gpu_type: str = "B200", debug: bool = False):
                 "max_relative_error": sum(rel_errors) / n,
                 "max_absolute_error": sum(abs_errors) / n,
                 "total_workloads": n,
+                "trace_evaluations": summarize_traces(traces),
             },
         }
 
