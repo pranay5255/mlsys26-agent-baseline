@@ -55,6 +55,10 @@ messages can point back to a single source of detail.
   FlashInfer Bench.
 - Uses `main.py::run`, `SupportedLanguages.PYTHON`, and
   `nvidia-cutlass-dsl` dependencies for generated solutions.
+- Normalizes generated CuTe source before local or Modal evaluation.
+- Adds a static CuTe preflight that rejects known compile dead ends such as
+  `cute.load`, `cute.store`, `cute.shared_memory`, and bracket launch before
+  spending Modal B200 compile time.
 - Preserves result aggregation into `EvalResult`.
 
 ## agent/evolve_agent.py
@@ -89,7 +93,10 @@ messages can point back to a single source of detail.
 - Configures CuTe DSL cache and optional debug logging environment variables.
 - Evaluates generated Python/CuTe DSL solutions on Modal B200 with the same
   FlashInfer Bench metadata as local evaluation.
-- Resyncs the dataset volume so newly added mini workloads reach Modal.
+- Normalizes common generated import and stream mistakes inside the remote eval
+  function as a defensive guard.
+- Syncs only benchmark payload directories with `force=True`, avoiding repeated
+  uploads of `.git/lfs` internals that can trigger Modal `FileExistsError`.
 
 ## agent/utils.py
 
@@ -97,6 +104,12 @@ messages can point back to a single source of detail.
 - Loads task lists that can enumerate explicit problem names by op type.
 - Allows YAML config loading to reparse a supplied argv list, enabling Python
   experiment scripts to call the agent without shell subprocesses.
+- Adds shared CuTe DSL scaffold prompt text with a compile-safe import, launch,
+  stream, and executor-cache pattern.
+- Adds CuTe source normalization for bad `from_dlpack` imports, `default_stream`
+  imports, stream synchronization, and CUDA/Triton-style `cute.arch` builtins.
+- Adds static CuTe source issue detection for unsupported direct helpers and
+  invalid bracket launch syntax.
 
 ## config/config_evolve.yaml
 
@@ -213,6 +226,8 @@ messages can point back to a single source of detail.
 - Requires module-scope CuTe decorators, explicit launch parameters, stream
   handling through `cutlass.cuda`, DLPack/layout usage, unsupported-pattern
   avoidance, and module-level `cute.compile` caches.
+- Injects the shared compile-safe CuTe scaffold and explicitly warns that static
+  preflight rejects unsupported APIs before B200 compilation.
 - Adds optional experiment-focus guidance for fused attention, softmax/LSE, and
   RMSNorm-style reduction runs.
 
@@ -222,6 +237,8 @@ messages can point back to a single source of detail.
   `str_replace` edit protocol.
 - Adds benchmark timing details, CuTe DSL correctness constraints, and
   experiment-focus propagation.
+- Injects the shared compile-safe CuTe scaffold and makes import, stream,
+  `cute.arch`, and launch syntax fixes first-class tuning guidance.
 - Improves metric parsing for `correct=True` and JSON-style correctness fields.
 
 ## pyproject.toml
@@ -277,6 +294,8 @@ messages can point back to a single source of detail.
 - Adds tests for CuTe prompt requirements, tuner edit protocol, OpenRouter
   client construction, Python/CuTe FlashInfer Bench metadata, experiment-focus
   propagation, programmatic config parsing, and Python experiment argv building.
+- Adds regression coverage for CuTe source normalization, static preflight
+  rejection, scaffold prompt injection, and avoiding duplicate stream rewrites.
 
 ## uv.lock
 
