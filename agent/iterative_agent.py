@@ -1,4 +1,4 @@
-# Iterative Agent: propose initial kernel, then iteratively refine
+# Iterative Agent: propose initial CuTe DSL solution, then iteratively refine
 
 import argparse
 import json
@@ -10,7 +10,13 @@ from tqdm import tqdm
 
 from agent.api import query_inference_server
 from agent.eval import EvalResult, calculate_score
-from agent.utils import extract_edits, extract_first_code, get_dataset_root, str_replace
+from agent.utils import (
+    extract_edits,
+    extract_first_code,
+    get_dataset_root,
+    normalize_cute_source,
+    str_replace,
+)
 from prompt.proposer_prompt import generate_pool_prompt, generate_proposer_prompt
 from prompt.tuner_prompt import generate_tuner_prompt
 
@@ -29,7 +35,7 @@ def propose_step(
     elite_metrics_pool: list | None = None,
     elite_context_ids: list[int] | None = None,
 ):
-    """Generate a new kernel proposal via the Proposer LLM."""
+    """Generate a new CuTe DSL solution proposal via the Proposer LLM."""
     pool_prompt = generate_pool_prompt(
         kernel_pool=kernel_pool,
         metrics_pool=metrics_pool,
@@ -47,8 +53,11 @@ def propose_step(
         model_name=args.model_name,
         prompt=proposer_prompt,
         max_completion_tokens=args.max_completion_tokens,
+        temperature=args.temperature,
     )
-    proposal_kernel = extract_first_code(proposer_output, ["python", "cpp"])
+    proposal_kernel = normalize_cute_source(
+        extract_first_code(proposer_output, ["python", "py"])
+    )
     proposal_metrics = args.eval_fn(
         kernel_code=proposal_kernel,
         task_id=getattr(args, "problem_id", None),
@@ -70,7 +79,7 @@ def refine_step(
     previous_metrics: list,
     args: argparse.Namespace,
 ):
-    """Refine the latest kernel via the Tuner LLM (str_replace edits)."""
+    """Refine the latest CuTe DSL solution via the Tuner LLM (str_replace edits)."""
     tuner_prompt = generate_tuner_prompt(
         task_params=args.task_params,
         previous_kernels=previous_kernels,
@@ -83,11 +92,13 @@ def refine_step(
         model_name=args.model_name,
         prompt=tuner_prompt,
         max_completion_tokens=args.max_completion_tokens,
+        temperature=args.temperature,
     )
     tuned_kernel = previous_kernels[-1]
     edits = extract_edits(tuner_output)
     for old_str, new_str in edits:
         tuned_kernel = str_replace(tuned_kernel, old_str, new_str)
+    tuned_kernel = normalize_cute_source(tuned_kernel)
 
     tuned_metrics = args.eval_fn(
         kernel_code=tuned_kernel,
@@ -105,7 +116,7 @@ def refine_step(
 
 def load_from_logs(log_path: str):
     """
-    Load previous kernels and metrics from log files (large_loop_id=0).
+    Load previous solutions and metrics from log files (large_loop_id=0).
 
     Returns:
         (previous_kernels, previous_metrics, max_step,
@@ -192,7 +203,7 @@ def copy_step_files(src_path: str, dst_path: str, max_step: int = 0):
 
 
 def _save_step(log_path, prefix, kernel, metrics, prompt_text):
-    """Save kernel, metrics JSON, and prompt for a single step."""
+    """Save solution source, metrics JSON, and prompt for a single step."""
     if log_path is None:
         return
     with open(os.path.join(log_path, f"{prefix}.py"), "w") as f:
@@ -252,10 +263,10 @@ def run_iterative_loop(
         initial=start_step,
         total=args.refine_steps,
     ):
-        logger.debug(f"Running kernel {i+1} of {args.refine_steps}")
+        logger.debug(f"Running solution {i+1} of {args.refine_steps}")
 
         if len(previous_kernels) == 0:
-            # Propose initial kernel
+            # Propose initial solution
             proposal_kernel, proposal_metrics, logs = propose_step(
                 ref_arch_src, inference_server, [], [], args
             )
