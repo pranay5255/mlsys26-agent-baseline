@@ -204,6 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ncu_kernel_name", default=None)
     parser.add_argument("--ncu_launch_skip", type=int, default=None)
     parser.add_argument("--ncu_launch_count", type=int, default=None)
+    parser.add_argument(
+        "--allow_static_issues",
+        action="store_true",
+        help=(
+            "Run anyway when the local CuTe preflight finds known source issues. "
+            "Useful for collecting raw remote compiler logs; NCU may not capture "
+            "kernels if compilation stops first."
+        ),
+    )
     parser.add_argument("--dump_traces", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     return parser
@@ -414,7 +423,6 @@ def create_profile_app(gpu_type: str):
 def _download_profile_artifacts(volume, remote_tar: str, local_dir: Path) -> Path:
     local_dir.mkdir(parents=True, exist_ok=True)
     tar_path = local_dir / "profile_artifacts.tar.gz"
-    volume.reload()
     with tar_path.open("wb") as f:
         volume.read_file_into_fileobj(remote_tar, f)
     with tarfile.open(tar_path, "r:gz") as tar:
@@ -431,13 +439,9 @@ def main(argv: list[str] | None = None) -> None:
 
     kernel_code = kernel_path.read_text(encoding="utf-8")
     kernel_code, source_issues = prepare_cute_source_for_eval(kernel_code)
-    if source_issues:
-        print("Static CuTe source issues were found before profiling:")
-        for issue in source_issues:
-            print(f"- {issue}")
-        print("No GPU kernel will launch until these are fixed.")
-        if args.profiler != "none":
-            raise SystemExit(2)
+    blocking_static_issues = (
+        bool(source_issues) and args.profiler != "none" and not args.allow_static_issues
+    )
 
     run_name = args.run_name or f"{kernel_path.stem}_{uuid.uuid4().hex[:8]}"
     local_dir = Path(args.output_dir).expanduser().resolve() / run_name
@@ -462,8 +466,18 @@ def main(argv: list[str] | None = None) -> None:
     print("Profile command:")
     print(" ".join(shlex.quote(part) for part in display_cmd))
     print(f"Local output directory: {local_dir}")
+    if source_issues:
+        print("Static CuTe source issues were found before profiling:")
+        for issue in source_issues:
+            print(f"- {issue}")
+        print("No GPU kernel will launch until these are fixed.")
     if args.dry_run:
         return
+    if blocking_static_issues:
+        raise SystemExit(
+            "Refusing to start a profiler run that cannot launch a kernel. "
+            "Pass --allow_static_issues to collect raw remote compiler logs anyway."
+        )
 
     app, remote_profile, profile_vol = create_profile_app(args.gpu)
     with modal.enable_output(), app.run():
