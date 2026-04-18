@@ -1,10 +1,5 @@
-anthropic
-openai
-numpy
-pydantic
-pyyaml
-tqdm
-flashinfer-bench
-torch
-triton
-modal
+# This project is managed with uv. Install dependencies with:
+#
+#   uv sync
+#
+# Runtime dependencies are declared in pyproject.toml.
