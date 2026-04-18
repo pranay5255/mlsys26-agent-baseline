@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import json
 import logging
 import os
@@ -14,7 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 from agent.api import create_inference_server  # noqa: E402
-from agent.eval import create_eval_fn, read_metrics  # noqa: E402
+from agent.eval import (  # noqa: E402
+    DEFAULT_BENCHMARK_ITERATIONS,
+    DEFAULT_BENCHMARK_TRIALS,
+    DEFAULT_EVAL_TIMEOUT_SECONDS,
+    DEFAULT_WARMUP_RUNS,
+    create_eval_fn,
+    read_metrics,
+)
 from agent.evolve_agent import run_evolve_loop  # noqa: E402
 from agent.iterative_agent import run_iterative_loop  # noqa: E402
 from agent.utils import load_config_from_yaml  # noqa: E402
@@ -29,6 +37,14 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _get_package_version(package_name: str) -> str:
+    """Return installed package version or a readable fallback."""
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed locally"
 
 
 def run_agent(args: argparse.Namespace, inference_server, level, problem_id):
@@ -49,7 +65,14 @@ def run_agent(args: argparse.Namespace, inference_server, level, problem_id):
         "gpu_name": args.gpu_name,
         "gpu_architecture": args.gpu_architecture,
         "dtype_str": str(ref_arch_src.get("inputs", "unknown")),
+        "benchmark_warmup_runs": args.eval_warmup_runs,
+        "benchmark_iterations": args.eval_iterations,
+        "benchmark_trials": args.eval_num_trials,
+        "eval_timeout_seconds": args.eval_timeout,
+        "cute_dsl_version": _get_package_version("nvidia-cutlass-dsl"),
     }
+    if args.experiment_focus:
+        args.task_params["experiment_focus"] = args.experiment_focus
 
     with open(os.path.join(result_save_path, "reference_src.py"), "w") as f:
         f.write(json.dumps(ref_arch_src, indent=4))
@@ -163,7 +186,8 @@ def run_main_loop(args):
         print("Accuracy: N/A (no test problems)")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
+    """Create the CLI parser."""
     parser = argparse.ArgumentParser()
 
     # Test Configs
@@ -183,9 +207,12 @@ if __name__ == "__main__":
 
     # Base Model Configs
     parser.add_argument(
-        "--api_type", type=str, default="openai", choices=["openai", "claude"]
+        "--api_type",
+        type=str,
+        default="openrouter",
+        choices=["openai", "openrouter", "claude"],
     )
-    parser.add_argument("--model_name", type=str, default="gpt-5-mini")
+    parser.add_argument("--model_name", type=str, default="anthropic/claude-sonnet-4-5")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--max_completion_tokens", type=int, default=16384)
 
@@ -197,15 +224,32 @@ if __name__ == "__main__":
     parser.add_argument("--max_memory_round", type=int, default=5)
     parser.add_argument("--pool_size", type=int, default=5)
     parser.add_argument("--softmax_temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--experiment_focus",
+        type=str,
+        default=None,
+        help=(
+            "Optional prompt guidance for a specific experiment, such as fused "
+            "attention, softmax/LSE, or RMSNorm-style reduction emphasis."
+        ),
+    )
 
     # Eval Backend Configs
     parser.add_argument(
         "--eval_backend",
         type=str,
-        default="local",
+        default="modal",
         choices=["local", "modal"],
     )
     parser.add_argument("--modal_gpu", type=str, default="B200")
+    parser.add_argument(
+        "--eval_timeout", type=int, default=DEFAULT_EVAL_TIMEOUT_SECONDS
+    )
+    parser.add_argument("--eval_warmup_runs", type=int, default=DEFAULT_WARMUP_RUNS)
+    parser.add_argument(
+        "--eval_iterations", type=int, default=DEFAULT_BENCHMARK_ITERATIONS
+    )
+    parser.add_argument("--eval_num_trials", type=int, default=DEFAULT_BENCHMARK_TRIALS)
 
     # Logging Configs
     parser.add_argument("--save_path", type=str, default=None)
@@ -214,8 +258,13 @@ if __name__ == "__main__":
     # Config file
     parser.add_argument("--config", type=str, default=None)
 
-    args = parser.parse_args()
-    args = load_config_from_yaml(args, parser)
+    return parser
+
+
+def main(argv: list[str] | None = None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args = load_config_from_yaml(args, parser, argv)
     start_time = time.strftime("%Y%m%d-%H%M%S", time.localtime())
 
     if args.save_path is None:
@@ -234,9 +283,17 @@ if __name__ == "__main__":
 
         from agent.modal_eval import create_modal_app, ensure_dataset_synced
 
-        modal_app, remote_eval_fn, dataset_vol = create_modal_app(args.modal_gpu)
+        modal_app, remote_eval_fn, dataset_vol = create_modal_app(
+            args.modal_gpu, debug=args.debug
+        )
         args.eval_fn = create_eval_fn(
-            "modal", args.test_source, remote_fn=remote_eval_fn
+            "modal",
+            args.test_source,
+            remote_fn=remote_eval_fn,
+            timeout=args.eval_timeout,
+            warmup_runs=args.eval_warmup_runs,
+            iterations=args.eval_iterations,
+            num_trials=args.eval_num_trials,
         )
         with modal.enable_output(), modal_app.run():
             ensure_dataset_synced(
@@ -244,5 +301,15 @@ if __name__ == "__main__":
             )
             run_main_loop(args)
     else:
-        args.eval_fn = create_eval_fn("local")
+        args.eval_fn = create_eval_fn(
+            "local",
+            timeout=args.eval_timeout,
+            warmup_runs=args.eval_warmup_runs,
+            iterations=args.eval_iterations,
+            num_trials=args.eval_num_trials,
+        )
         run_main_loop(args)
+
+
+if __name__ == "__main__":
+    main()
