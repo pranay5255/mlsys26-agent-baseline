@@ -1,0 +1,951 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSA PS1 Trace Failure Explorer</title>
+  <style>
+    :root {
+      --ink: #13211f;
+      --muted: #5e6a66;
+      --paper: #f6f7f4;
+      --panel: #ffffff;
+      --line: #d9dfd8;
+      --good: #1f9d72;
+      --bad: #c24132;
+      --warn: #c88424;
+      --blue: #386fa4;
+      --teal: #168f8b;
+      --purple: #7a4fb3;
+      --rose: #b24a64;
+      --brown: #8a6a2a;
+      --gray: #69757a;
+      --shadow: 0 12px 28px rgba(19, 33, 31, 0.08);
+      --radius: 8px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      line-height: 1.45;
+    }
+
+    a { color: inherit; }
+    .hero {
+      min-height: 72vh;
+      padding: 34px clamp(18px, 4vw, 56px) 30px;
+      color: #f8fbf5;
+      background:
+        linear-gradient(rgba(19, 33, 31, 0.78), rgba(19, 33, 31, 0.82)),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.12) 0 1px, transparent 1px 56px),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.10) 0 1px, transparent 1px 42px),
+        #19352f;
+      display: grid;
+      align-content: space-between;
+      gap: 34px;
+    }
+
+    .hero-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: rgba(248, 251, 245, 0.78);
+    }
+
+    .hero h1 {
+      margin: 0;
+      max-width: 980px;
+      font-size: clamp(42px, 7vw, 92px);
+      line-height: 0.96;
+      letter-spacing: 0;
+      font-weight: 760;
+    }
+
+    .hero-copy {
+      max-width: 840px;
+      font-size: clamp(17px, 2vw, 23px);
+      color: rgba(248, 251, 245, 0.86);
+      margin: 18px 0 0;
+    }
+
+    .hero-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      max-width: 980px;
+    }
+
+    .signal {
+      border: 1px solid rgba(248, 251, 245, 0.18);
+      background: rgba(255,255,255,0.08);
+      border-radius: var(--radius);
+      padding: 14px;
+      min-height: 92px;
+    }
+    .signal b {
+      display: block;
+      font-size: 32px;
+      line-height: 1.1;
+      color: #fff;
+    }
+    .signal span {
+      display: block;
+      margin-top: 6px;
+      font-size: 13px;
+      color: rgba(248, 251, 245, 0.76);
+    }
+
+    .band {
+      padding: 34px clamp(18px, 4vw, 56px);
+      border-top: 1px solid var(--line);
+    }
+    .band.alt { background: #fff; }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    h2 {
+      margin: 0;
+      font-size: clamp(24px, 3vw, 38px);
+      letter-spacing: 0;
+    }
+    .section-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      max-width: 760px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+    .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .metric {
+      min-height: 118px;
+    }
+    .metric .num {
+      font-size: clamp(34px, 5vw, 56px);
+      line-height: 1;
+      font-weight: 760;
+      color: var(--ink);
+    }
+    .metric .label {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .metric .hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--gray);
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(130px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .stage {
+      min-width: 130px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: #fff;
+      padding: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+    .stage:before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 5px;
+      background: var(--stage-color, var(--gray));
+    }
+    .stage .count {
+      font-size: 30px;
+      font-weight: 760;
+      margin-top: 8px;
+    }
+    .stage .name {
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 38px;
+    }
+    .stage .pct {
+      font-size: 12px;
+      color: var(--gray);
+      margin-top: 8px;
+    }
+
+    .bars {
+      display: grid;
+      gap: 10px;
+    }
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(190px, 280px) 1fr 42px;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .track {
+      height: 14px;
+      border-radius: 999px;
+      background: #edf0eb;
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+    .fill {
+      height: 100%;
+      width: 0;
+      background: var(--bar-color, var(--blue));
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input, select {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 14px;
+    }
+    input { min-width: min(100%, 340px); }
+    button {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover, button.active {
+      border-color: var(--ink);
+      background: #eaf3ef;
+    }
+
+    .run-lanes {
+      display: grid;
+      gap: 14px;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: minmax(230px, 340px) 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    .lane-title {
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .lane-title b {
+      display: block;
+      color: var(--ink);
+      font-size: 15px;
+      overflow-wrap: anywhere;
+    }
+    .tiles {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+      gap: 8px;
+    }
+    .tile {
+      border: 1px solid rgba(19, 33, 31, 0.14);
+      border-radius: 6px;
+      min-height: 72px;
+      padding: 9px;
+      background: #fff;
+      border-top: 6px solid var(--tile-color, var(--gray));
+      cursor: pointer;
+    }
+    .tile b {
+      display: block;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .tile span {
+      display: block;
+      margin-top: 5px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .detail-panel {
+      min-height: 210px;
+    }
+    .detail-panel .chip {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      color: #fff;
+      background: var(--chip, var(--gray));
+      margin: 0 6px 8px 0;
+    }
+    .detail-panel code, td code {
+      color: #30413d;
+      background: #eef1ed;
+      border-radius: 4px;
+      padding: 2px 4px;
+      overflow-wrap: anywhere;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background: #f9faf7;
+      z-index: 1;
+      color: #3e4b47;
+      font-weight: 700;
+    }
+    .table-wrap {
+      max-height: 620px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .heatmap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+    .heatmap td:not(:first-child), .heatmap th:not(:first-child) {
+      text-align: center;
+      min-width: 92px;
+    }
+    .heat {
+      color: #fff;
+      border-radius: 5px;
+      display: inline-flex;
+      min-width: 34px;
+      min-height: 28px;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }
+    .zero { color: #98a29d; }
+
+    .mode-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 12px;
+    }
+    .mode {
+      border-left: 6px solid var(--mode, var(--gray));
+    }
+    .mode ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .code-block {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--line);
+      background: #101816;
+      color: #eaf0ed;
+      border-radius: var(--radius);
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .foot {
+      color: var(--muted);
+      font-size: 13px;
+      padding-bottom: 44px;
+    }
+
+    @media (max-width: 980px) {
+      .hero-strip, .grid.cols-2, .grid.cols-3, .grid.cols-4 {
+        grid-template-columns: 1fr 1fr;
+      }
+      .lane {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 620px) {
+      .hero {
+        min-height: auto;
+      }
+      .hero-strip, .grid.cols-2, .grid.cols-3, .grid.cols-4 {
+        grid-template-columns: 1fr;
+      }
+      .bar-row {
+        grid-template-columns: 1fr 1fr 34px;
+      }
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-top">
+      <span>Artifact root: outputs/</span>
+      <span>Task: dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1</span>
+      <span>Generated report: 2026-04-18</span>
+    </div>
+    <div>
+      <h1>DSA PS1 Trace Failure Explorer</h1>
+      <p class="hero-copy">A static read of the saved run artifacts. The runs explored fused sparse attention, softmax/LSE stability, and reduction-oriented variants on B200, but every evaluated candidate stopped before a correct benchmark result.</p>
+    </div>
+    <div class="hero-strip" id="heroMetrics"></div>
+  </header>
+
+  <section class="band alt">
+    <div class="section-head">
+      <div>
+        <h2>What Happened</h2>
+        <p>The trace evidence clusters before GPU correctness: source guards, Python import/build, CuTe AST preprocessing, CuTe API resolution, JIT scalar signatures, MLIR lowering, and pointer/tensor semantics.</p>
+      </div>
+    </div>
+    <div class="grid cols-4" id="summaryCards"></div>
+  </section>
+
+  <section class="band">
+    <div class="section-head">
+      <div>
+        <h2>Failure Pipeline</h2>
+        <p>Each block shows how many saved metric files failed at that stage. No candidate reached a passing correctness check or a usable speed measurement.</p>
+      </div>
+    </div>
+    <div class="pipeline" id="pipeline"></div>
+  </section>
+
+  <section class="band alt">
+    <div class="section-head">
+      <div>
+        <h2>Failure Taxonomy</h2>
+        <p>Counts come from all <code>*_metrics.json</code> files under <code>outputs/experiments</code>. The same taxonomy drives the run tiles and searchable table below.</p>
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Category Distribution</h3>
+        <div class="bars" id="categoryBars"></div>
+      </div>
+      <div class="card">
+        <h3>Experiment Heatmap</h3>
+        <div class="heatmap" id="heatmap"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="section-head">
+      <div>
+        <h2>Run Timeline</h2>
+        <p>Click a run tile to inspect the primary failure message and source metric file.</p>
+      </div>
+      <div class="toolbar">
+        <select id="categoryFilter" aria-label="Filter by category"></select>
+        <button id="clearFilter" type="button">Clear</button>
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="run-lanes" id="runLanes"></div>
+      <div class="card detail-panel" id="detailPanel"></div>
+    </div>
+  </section>
+
+  <section class="band alt">
+    <div class="section-head">
+      <div>
+        <h2>Failure Modes</h2>
+        <p>These are the actionable meanings behind the repeated trace signatures.</p>
+      </div>
+    </div>
+    <div class="mode-grid" id="modeGrid"></div>
+  </section>
+
+  <section class="band">
+    <div class="section-head">
+      <div>
+        <h2>Profiler Artifact</h2>
+        <p>The NCU run exists, but it does not prove candidate-kernel performance. It profiles many process kernels and then the application exits with code 9 before benchmark JSON is written.</p>
+      </div>
+    </div>
+    <div class="grid cols-3">
+      <div class="card metric">
+        <div class="num">9</div>
+        <div class="label">NCU application return code</div>
+        <div class="hint">timed_out=false, benchmark_json_exists=false</div>
+      </div>
+      <div class="card metric">
+        <div class="num">104</div>
+        <div class="label">kernel profile entries before abort</div>
+        <div class="hint">mostly framework/reference kernels in the process</div>
+      </div>
+      <div class="card metric">
+        <div class="num">309 MB</div>
+        <div class="label">ncu_full_report.ncu-rep size</div>
+        <div class="hint">artifact is large but incomplete for benchmark outcome</div>
+      </div>
+    </div>
+    <div class="grid cols-2" style="margin-top:14px">
+      <div class="card">
+        <h3>Readout</h3>
+        <p id="profileText"></p>
+      </div>
+      <div class="card">
+        <h3>Key Log Tail</h3>
+        <div class="code-block">==ERROR== Failed to profile "vectorized_elementwise_kernel" in process 65
+==PROF== Trying to shutdown target application
+==ERROR== The application returned an error code (9).
+==PROF== Report: /data/_profiles/proposal_2_ncu_compile/ncu_full_report.ncu-rep</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band alt">
+    <div class="section-head">
+      <div>
+        <h2>Evidence Table</h2>
+        <p>Search across experiment name, run id, stage, category, primary failure, and metric path.</p>
+      </div>
+      <div class="toolbar">
+        <input id="searchBox" type="search" placeholder="Search traces, e.g. Int32, StaticBuffer, source preflight">
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Experiment</th>
+            <th>Run</th>
+            <th>Stage</th>
+            <th>Category</th>
+            <th>Compiled</th>
+            <th>Primary Failure</th>
+            <th>Metric File</th>
+          </tr>
+        </thead>
+        <tbody id="evidenceRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="band foot">
+    <p>This page is self-contained. It was built from the saved files in <code>outputs/experiments</code>, <code>failure_diagnostics_summary.md/json</code>, and <code>outputs/profiles/proposal_2_ncu_compile</code>. Empty dry profile directories are intentionally treated as placeholders.</p>
+  </section>
+
+  <script>
+    const TASK_DIR = "dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1";
+    const DATA = {
+      experiments: [
+        {name:"dsa_ps1_attention_fused", focus:"Fused sparse attention, one-kernel first", agent:"evolve", steps:6, pool:5, timeout:240, debug:false},
+        {name:"dsa_ps1_attention_fused_compile_first", focus:"Compile-first fused attempt", agent:"evolve", steps:3, pool:2, timeout:300, debug:false},
+        {name:"dsa_ps1_attention_fused_deep", focus:"Deep fused run with diagnostics", agent:"evolve", steps:14, pool:8, timeout:480, debug:true},
+        {name:"dsa_ps1_attention_fused_deep_v2", focus:"Deep fused v2 rerun", agent:"evolve", steps:14, pool:8, timeout:480, debug:true},
+        {name:"dsa_ps1_rmsnorm_reduction", focus:"RMSNorm/reduction-biased exploration", agent:"evolve", steps:2, pool:5, timeout:240, debug:false},
+        {name:"dsa_ps1_softmax_lse_debug", focus:"Softmax and base-2 LSE debug", agent:"iterative", steps:2, pool:2, timeout:360, debug:true},
+        {name:"dsa_ps1_softmax_lse_debug2", focus:"Softmax and LSE iterative debug v2", agent:"iterative", steps:10, pool:4, timeout:360, debug:true}
+      ],
+      runs: [
+        ["dsa_ps1_attention_fused","proposal_1",1,"CuTe AST preprocess","early return rejected by CuTe DSL","DSLAstPreprocessorError: Early exit (return) is not allowed in `dsa_sparse_attention_kernel`"],
+        ["dsa_ps1_attention_fused","proposal_2",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute.arch' has no attribute 'shared_memory'"],
+        ["dsa_ps1_attention_fused","proposal_3",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: cute.load and cute.store are not available in the installed CuTe DSL"],
+        ["dsa_ps1_attention_fused","proposal_4",1,"CuTe pointer/tensor model","pointer/tensor misuse","TypeError: 'Int64' object is not subscriptable"],
+        ["dsa_ps1_attention_fused","proposal_5",1,"CuTe MLIR lowering","dynamic MLIR value used as Python integer","DSLRuntimeError: ArithValue object cannot be interpreted as an integer"],
+        ["dsa_ps1_attention_fused","proposal_6",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: cute.load and cute.store are not available in the installed CuTe DSL"],
+        ["dsa_ps1_attention_fused_compile_first","proposal_1",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: return is not allowed inside @cute.kernel"],
+        ["dsa_ps1_attention_fused_compile_first","proposal_2",1,"CuTe pointer/tensor model","pointer/tensor misuse","TypeError: 'Int64' object is not subscriptable"],
+        ["dsa_ps1_attention_fused_compile_first","proposal_3",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: return is not allowed inside @cute.kernel"],
+        ["dsa_ps1_attention_fused_deep","proposal_1",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: cute.load and cute.store are not available in the installed CuTe DSL"],
+        ["dsa_ps1_attention_fused_deep","proposal_2",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #9 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_attention_fused_deep","proposal_3",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_attention_fused_deep","proposal_4",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (sm_scale_val) to be float, but got Float32"],
+        ["dsa_ps1_attention_fused_deep","proposal_5",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'StaticBuffer'"],
+        ["dsa_ps1_attention_fused_deep","proposal_6",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (sm_scale) to be float, but got Float32"],
+        ["dsa_ps1_attention_fused_deep","proposal_7",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'alloc_shared'"],
+        ["dsa_ps1_attention_fused_deep","proposal_8",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_attention_fused_deep","proposal_9",1,"CuTe MLIR lowering","dynamic MLIR value used as Python integer","DSLRuntimeError: ArithValue object cannot be interpreted as an integer"],
+        ["dsa_ps1_attention_fused_deep","proposal_10",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: int(...) inside @cute.kernel converts dynamic DSL values to Python integers"],
+        ["dsa_ps1_attention_fused_deep","proposal_11",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'range_dynamic'"],
+        ["dsa_ps1_attention_fused_deep","proposal_12",1,"CuTe MLIR lowering","dynamic MLIR value used as Python integer","DSLRuntimeError: ArithValue object cannot be interpreted as an integer"],
+        ["dsa_ps1_attention_fused_deep","proposal_13",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'tensor_view'"],
+        ["dsa_ps1_attention_fused_deep","proposal_14",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'maximum'"],
+        ["dsa_ps1_attention_fused_deep_v2","proposal_1",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: return is not allowed inside @cute.kernel"],
+        ["dsa_ps1_attention_fused_deep_v2","proposal_2",1,"CuTe API/lowering","unsupported or missing CuTe API","AttributeError: module 'cutlass.cute' has no attribute 'make_shape'"],
+        ["dsa_ps1_rmsnorm_reduction","proposal_1",0,"source preflight","source preflight static scan","BuildError: cannot import name 'from_dlpack' from 'cutlass.cute'"],
+        ["dsa_ps1_rmsnorm_reduction","proposal_2",0,"source preflight","source preflight static scan","BuildError: cannot import name 'from_dlpack' from 'cutlass'"],
+        ["dsa_ps1_softmax_lse_debug","proposal_0_1",1,"CuTe AST preprocess","early return rejected by CuTe DSL","DSLAstPreprocessorError: Early exit (return) is not allowed in `compute_logits_kernel`"],
+        ["dsa_ps1_softmax_lse_debug","tune_0_2",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #7 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_softmax_lse_debug2","proposal_0_1",0,"source preflight","source preflight static scan","STATIC_CUTE_SOURCE_ERROR: return is not allowed inside @cute.kernel"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_2",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_3",1,"CuTe MLIR lowering","dynamic MLIR value used as Python integer","DSLRuntimeError: ArithValue object cannot be interpreted as an integer"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_4",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_5",1,"CuTe JIT signature","JIT arg scalar type mismatch","DSLRuntimeError: expects argument #8 (num_tokens) to be int, but got Int32"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_6",0,"python import/build","python syntax/import error","BuildError: expected an indented block after function definition on line 227"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_7",0,"python import/build","python syntax/import error","BuildError: invalid syntax at main.py line 266"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_8",0,"python import/build","python syntax/import error","BuildError: invalid syntax at main.py line 266"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_9",0,"python import/build","python syntax/import error","BuildError: invalid syntax at main.py line 266"],
+        ["dsa_ps1_softmax_lse_debug2","tune_0_10",0,"python import/build","python syntax/import error","BuildError: invalid syntax at main.py line 266"]
+      ],
+      files: {json:91, py:54, txt:41, yaml:7, md:1, log:1, ncuRep:1, gz:1},
+      profile: {
+        path:"outputs/profiles/proposal_2_ncu_compile/ncu.log",
+        failure:"NCU profiled many process kernels, then failed on vectorized_elementwise_kernel in process 65. The application returned code 9 before benchmark_result.json was written."
+      }
+    };
+
+    const COLORS = {
+      "source preflight static scan": "#b24a64",
+      "python syntax/import error": "#c88424",
+      "early return rejected by CuTe DSL": "#8a6a2a",
+      "unsupported or missing CuTe API": "#386fa4",
+      "JIT arg scalar type mismatch": "#7a4fb3",
+      "dynamic MLIR value used as Python integer": "#168f8b",
+      "pointer/tensor misuse": "#69757a"
+    };
+    const STAGE_COLORS = {
+      "source preflight": "#b24a64",
+      "python import/build": "#c88424",
+      "CuTe AST preprocess": "#8a6a2a",
+      "CuTe API/lowering": "#386fa4",
+      "CuTe JIT signature": "#7a4fb3",
+      "CuTe MLIR lowering": "#168f8b",
+      "CuTe pointer/tensor model": "#69757a"
+    };
+    const CATEGORY_ORDER = [
+      "source preflight static scan",
+      "JIT arg scalar type mismatch",
+      "unsupported or missing CuTe API",
+      "python syntax/import error",
+      "dynamic MLIR value used as Python integer",
+      "early return rejected by CuTe DSL",
+      "pointer/tensor misuse"
+    ];
+    const STAGE_ORDER = [
+      "source preflight",
+      "python import/build",
+      "CuTe AST preprocess",
+      "CuTe API/lowering",
+      "CuTe JIT signature",
+      "CuTe MLIR lowering",
+      "CuTe pointer/tensor model"
+    ];
+    const MODES = [
+      {
+        category:"source preflight static scan",
+        means:"The local/static guard or import path rejected the source before useful remote codegen evidence existed.",
+        next:["Remove unsupported helpers such as cute.load/cute.store.", "Replace early kernel returns with predicates.", "Import runtime helpers from the validated module path only."]
+      },
+      {
+        category:"JIT arg scalar type mismatch",
+        means:"Decorated CuTe functions expected Python host scalars, while launch lowered num_tokens or sm_scale as DSL Int32/Float32 values.",
+        next:["Keep fixed DSA dimensions as literals or compile-time constants.", "Do not annotate dynamic kernel parameters as Python int or float.", "Separate host JIT parameters from device DSL scalars."]
+      },
+      {
+        category:"unsupported or missing CuTe API",
+        means:"Generated code called helper names absent from the installed nvidia-cutlass-dsl package.",
+        next:["Avoid StaticBuffer, alloc_shared, range_dynamic, tensor_view, maximum, make_shape, and arch.shared_memory unless first validated.", "Use documented tensor indexing, layouts, and launch forms already present in local docs."]
+      },
+      {
+        category:"python syntax/import error",
+        means:"Some tuning patches leaked edit markers or malformed code into generated Python, stopping at module import.",
+        next:["Run a syntax/import check before remote evaluation.", "Keep tuner edits as direct source replacements with no markup remnants."]
+      },
+      {
+        category:"dynamic MLIR value used as Python integer",
+        means:"A runtime CuTe/MLIR scalar flowed into Python range/int/shape logic during lowering.",
+        next:["Use static ranges only for compile-time constants.", "Keep dynamic values in DSL scalar arithmetic and predication."]
+      },
+      {
+        category:"early return rejected by CuTe DSL",
+        means:"CuTe AST preprocessing rejects non-constexpr early return inside @cute.kernel.",
+        next:["Guard work with if predicates and write neutral outputs.", "Only use early exit in Python/JIT constexpr paths."]
+      },
+      {
+        category:"pointer/tensor misuse",
+        means:"A scalar Int64/Int32 value was treated like an indexable tensor or pointer after lowering.",
+        next:["Pass actual tensor views/pointers into kernels.", "Audit sparse_indices and cache addressing to avoid scalarizing pointer operands."]
+      }
+    ];
+
+    const records = DATA.runs.map(([experiment, run, compiled, stage, category, primary]) => {
+      const path = `outputs/experiments/${experiment}/${TASK_DIR}/${run}_metrics.json`;
+      return {
+        experiment, run, compiled: Boolean(compiled), correct:false, stage, category, primary,
+        path,
+        href: path.replace(/^outputs\//, "")
+      };
+    });
+
+    const countBy = (items, key) => items.reduce((acc, item) => {
+      acc[item[key]] = (acc[item[key]] || 0) + 1;
+      return acc;
+    }, {});
+    const byExp = DATA.experiments.reduce((acc, exp) => {
+      acc[exp.name] = records.filter(r => r.experiment === exp.name);
+      return acc;
+    }, {});
+    const categoryCounts = countBy(records, "category");
+    const stageCounts = countBy(records, "stage");
+    const maxCategory = Math.max(...Object.values(categoryCounts));
+
+    function el(tag, attrs = {}, children = []) {
+      const node = document.createElement(tag);
+      Object.entries(attrs).forEach(([k, v]) => {
+        if (k === "class") node.className = v;
+        else if (k === "style") node.setAttribute("style", v);
+        else if (k === "html") node.innerHTML = v;
+        else node.setAttribute(k, v);
+      });
+      [].concat(children).forEach(child => {
+        if (child === null || child === undefined) return;
+        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      });
+      return node;
+    }
+
+    function renderHero() {
+      const hero = document.getElementById("heroMetrics");
+      const compiled = records.filter(r => r.compiled).length;
+      const correct = records.filter(r => r.correct).length;
+      const metrics = [
+        [records.length, "metric evaluations parsed"],
+        [compiled, "imported or reached runtime path"],
+        [correct, "correct benchmark outputs"],
+        [Object.keys(categoryCounts).length, "recurring failure families"]
+      ];
+      hero.replaceChildren(...metrics.map(([n, label]) =>
+        el("div", {class:"signal"}, [el("b", {}, String(n)), el("span", {}, label)])
+      ));
+    }
+
+    function renderSummary() {
+      const cards = [
+        [records.length, "Saved metric files", "All proposal, tune, and global-best metric JSON files under experiments."],
+        [records.filter(r => r.compiled).length, "Compiled flag true", "These still failed correctness or runtime; compiled does not mean benchmark success."],
+        ["0.0x", "Best recorded speedup", "Every run has correct=false and speedup=0.0."],
+        ["B200", "Target GPU", "All experiment configs target Blackwell B200 through Modal."]
+      ];
+      document.getElementById("summaryCards").replaceChildren(...cards.map(([n, label, hint]) =>
+        el("div", {class:"card metric"}, [
+          el("div", {class:"num"}, String(n)),
+          el("div", {class:"label"}, label),
+          el("div", {class:"hint"}, hint)
+        ])
+      ));
+    }
+
+    function renderPipeline() {
+      const total = records.length;
+      const nodes = STAGE_ORDER.map(stage => {
+        const n = stageCounts[stage] || 0;
+        return el("div", {class:"stage", style:`--stage-color:${STAGE_COLORS[stage]}`}, [
+          el("div", {class:"count"}, String(n)),
+          el("div", {class:"name"}, stage),
+          el("div", {class:"pct"}, `${Math.round(n / total * 100)}% of evaluated runs`)
+        ]);
+      });
+      document.getElementById("pipeline").replaceChildren(...nodes);
+    }
+
+    function renderBars() {
+      const rows = CATEGORY_ORDER.map(cat => {
+        const n = categoryCounts[cat] || 0;
+        const pct = maxCategory ? n / maxCategory * 100 : 0;
+        return el("div", {class:"bar-row"}, [
+          el("div", {}, cat),
+          el("div", {class:"track"}, [
+            el("div", {class:"fill", style:`width:${pct}%;--bar-color:${COLORS[cat]}`})
+          ]),
+          el("b", {}, String(n))
+        ]);
+      });
+      document.getElementById("categoryBars").replaceChildren(...rows);
+    }
+
+    function renderHeatmap() {
+      const table = el("table");
+      const head = el("thead", {}, [el("tr", {}, [
+        el("th", {}, "Experiment"),
+        ...CATEGORY_ORDER.map(cat => el("th", {}, cat.replace(" by ", " ").replace(" static scan", "")))
+      ])]);
+      const body = el("tbody");
+      DATA.experiments.forEach(exp => {
+        const runs = byExp[exp.name] || [];
+        const counts = countBy(runs, "category");
+        const cells = CATEGORY_ORDER.map(cat => {
+          const n = counts[cat] || 0;
+          const alpha = n ? Math.min(1, 0.35 + n / maxCategory * 0.65) : 0;
+          return el("td", {}, n
+            ? el("span", {class:"heat", style:`background:${COLORS[cat]};opacity:${alpha}`}, String(n))
+            : el("span", {class:"zero"}, "0")
+          );
+        });
+        body.appendChild(el("tr", {}, [el("td", {}, [el("b", {}, exp.name), el("br"), el("span", {style:"color:#5e6a66"}, exp.focus)]), ...cells]));
+      });
+      table.append(head, body);
+      document.getElementById("heatmap").replaceChildren(table);
+    }
+
+    function renderFilters() {
+      const select = document.getElementById("categoryFilter");
+      select.replaceChildren(
+        el("option", {value:""}, "All categories"),
+        ...CATEGORY_ORDER.map(cat => el("option", {value:cat}, cat))
+      );
+      select.addEventListener("change", () => renderRuns(select.value));
+      document.getElementById("clearFilter").addEventListener("click", () => {
+        select.value = "";
+        renderRuns("");
+      });
+    }
+
+    function renderRuns(filter = "") {
+      const lanes = DATA.experiments.map(exp => {
+        const runs = (byExp[exp.name] || []).filter(r => !filter || r.category === filter);
+        const title = el("div", {class:"lane-title"}, [
+          el("b", {}, exp.name),
+          `${exp.focus}. agent=${exp.agent}, steps=${exp.steps}, pool=${exp.pool}, timeout=${exp.timeout}s`
+        ]);
+        const tiles = runs.map(r => {
+          const tile = el("button", {class:"tile", style:`--tile-color:${COLORS[r.category]}`, type:"button"}, [
+            el("b", {}, r.run),
+            el("span", {}, r.stage),
+            el("span", {}, r.compiled ? "compiled=true" : "compiled=false")
+          ]);
+          tile.addEventListener("click", () => renderDetail(r));
+          return tile;
+        });
+        return el("div", {class:"lane"}, [title, el("div", {class:"tiles"}, tiles.length ? tiles : [el("span", {class:"zero"}, "No runs in this filter")])]);
+      });
+      document.getElementById("runLanes").replaceChildren(...lanes);
+    }
+
+    function renderDetail(record = records[0]) {
+      const panel = document.getElementById("detailPanel");
+      panel.replaceChildren(
+        el("h3", {}, `${record.experiment} / ${record.run}`),
+        el("span", {class:"chip", style:`--chip:${COLORS[record.category]}`}, record.category),
+        el("span", {class:"chip", style:`--chip:${STAGE_COLORS[record.stage]}`}, record.stage),
+        el("p", {}, record.primary),
+        el("p", {style:"margin-top:12px"}, [
+          "Compiled flag: ",
+          el("code", {}, String(record.compiled)),
+          " | Correct: ",
+          el("code", {}, "false"),
+          " | Speedup: ",
+          el("code", {}, "0.0")
+        ]),
+        el("p", {style:"margin-top:12px"}, [
+          "Metric file: ",
+          el("a", {href:record.href}, record.path)
+        ])
+      );
+    }
+
+    function renderModes() {
+      const nodes = MODES.map(mode => el("div", {class:"card mode", style:`--mode:${COLORS[mode.category]}`}, [
+        el("h3", {}, mode.category),
+        el("p", {}, mode.means),
+        el("ul", {}, mode.next.map(item => el("li", {}, item)))
+      ]));
+      document.getElementById("modeGrid").replaceChildren(...nodes);
+    }
+
+    function renderProfile() {
+      const fileBits = `Artifact inventory: ${DATA.files.json} JSON, ${DATA.files.py} Python, ${DATA.files.txt} text/prompt, ${DATA.files.yaml} YAML, ${DATA.files.ncuRep} NCU report, ${DATA.files.gz} tarball.`;
+      document.getElementById("profileText").textContent = `${DATA.profile.failure} Path: ${DATA.profile.path}. ${fileBits}`;
+    }
+
+    function renderEvidence() {
+      const query = document.getElementById("searchBox").value.trim().toLowerCase();
+      const rows = records.filter(r => {
+        if (!query) return true;
+        return [r.experiment, r.run, r.stage, r.category, r.primary, r.path].join(" ").toLowerCase().includes(query);
+      }).map(r => el("tr", {}, [
+        el("td", {}, r.experiment),
+        el("td", {}, el("code", {}, r.run)),
+        el("td", {}, r.stage),
+        el("td", {}, [el("span", {class:"chip", style:`--chip:${COLORS[r.category]}`}, r.category)]),
+        el("td", {}, String(r.compiled)),
+        el("td", {}, r.primary),
+        el("td", {}, el("a", {href:r.href}, r.path))
+      ]));
+      document.getElementById("evidenceRows").replaceChildren(...rows);
+    }
+
+    document.getElementById("searchBox").addEventListener("input", renderEvidence);
+    renderHero();
+    renderSummary();
+    renderPipeline();
+    renderBars();
+    renderHeatmap();
+    renderFilters();
+    renderRuns();
+    renderDetail(records[0]);
+    renderModes();
+    renderProfile();
+    renderEvidence();
+  </script>
+</body>
+</html>
