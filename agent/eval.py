@@ -5,8 +5,10 @@ CuTe DSL solution evaluation using flashinfer-bench Python API directly.
 import functools
 import json
 import logging
+import os
 import uuid
 
+from agent.diagnostics import build_eval_diagnostics
 from flashinfer_bench.bench import Benchmark, BenchmarkConfig
 from flashinfer_bench.data import (
     BuildSpec,
@@ -39,6 +41,64 @@ class EvalResult(BaseModel):
     task_id: str = ""
     error: str | None = None
     stats: dict | None = None
+    diagnostics: dict | None = None
+
+
+def _attach_diagnostics(
+    result: EvalResult, source_issues: list[str] | None = None
+) -> EvalResult:
+    if result.diagnostics is None:
+        result.diagnostics = build_eval_diagnostics(
+            compiled=result.compiled,
+            correct=result.correct,
+            error=result.error,
+            stats=result.stats,
+            source_issues=source_issues,
+        )
+    return result
+
+
+def _configure_cute_deep_logs() -> None:
+    """Enable detailed CuTe DSL host-side compilation logs by default."""
+    os.environ.setdefault("CUTE_DSL_LINEINFO", "1")
+    os.environ.setdefault("CUTE_DSL_LOG_TO_CONSOLE", "1")
+    os.environ.setdefault("CUTE_DSL_LOG_LEVEL", "20")
+
+
+def _summarize_traces(traces) -> list[dict]:
+    summaries = []
+    for idx, trace in enumerate(traces):
+        ev = getattr(trace, "evaluation", None)
+        if ev is None:
+            summaries.append({"index": idx, "status": "NO_EVALUATION"})
+            continue
+        status = getattr(getattr(ev, "status", None), "value", None) or str(
+            getattr(ev, "status", "unknown")
+        )
+        log = getattr(ev, "log", None) or ""
+        entry = {
+            "index": idx,
+            "status": status,
+            "log_length": len(log),
+            "log_tail": log[-6000:],
+        }
+        performance = getattr(ev, "performance", None)
+        if performance is not None:
+            entry["performance"] = {
+                "latency_ms": getattr(performance, "latency_ms", None),
+                "reference_latency_ms": getattr(
+                    performance, "reference_latency_ms", None
+                ),
+                "speedup_factor": getattr(performance, "speedup_factor", None),
+            }
+        correctness = getattr(ev, "correctness", None)
+        if correctness is not None:
+            entry["correctness"] = {
+                "max_relative_error": getattr(correctness, "max_relative_error", None),
+                "max_absolute_error": getattr(correctness, "max_absolute_error", None),
+            }
+        summaries.append(entry)
+    return summaries
 
 
 def calculate_score(metric: EvalResult):
@@ -105,10 +165,13 @@ def create_eval_fn(
         def _modal_eval(kernel_code, task_id, dataset_root):
             kernel_code, source_issues = prepare_cute_source_for_eval(kernel_code)
             if source_issues:
-                return EvalResult(
-                    compiled=False,
-                    task_id=task_id,
-                    error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+                return _attach_diagnostics(
+                    EvalResult(
+                        compiled=False,
+                        task_id=task_id,
+                        error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+                    ),
+                    source_issues=source_issues,
                 )
             result_dict = remote_fn.remote(
                 kernel_code,
@@ -119,7 +182,7 @@ def create_eval_fn(
                 iterations,
                 num_trials,
             )
-            return EvalResult(**result_dict)
+            return _attach_diagnostics(EvalResult(**result_dict))
 
         return _modal_eval
     else:
@@ -147,12 +210,16 @@ def eval_kernel(
     Returns:
         EvalResult with compiled, correct, speedup, latency_ms, etc.
     """
+    _configure_cute_deep_logs()
     kernel_code, source_issues = prepare_cute_source_for_eval(kernel_code)
     if source_issues:
-        return EvalResult(
-            compiled=False,
-            task_id=task_id,
-            error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+        return _attach_diagnostics(
+            EvalResult(
+                compiled=False,
+                task_id=task_id,
+                error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+            ),
+            source_issues=source_issues,
         )
     trace_set = TraceSet.from_path(dataset_root)
 
@@ -205,10 +272,13 @@ def eval_kernel(
     for trace in traces:
         ev = trace.evaluation
         if ev and ev.status in error_statuses:
-            return EvalResult(
-                compiled=(ev.status != EvaluationStatus.COMPILE_ERROR),
-                task_id=task_id,
-                error=f"{ev.status.value}: {ev.log}",
+            return _attach_diagnostics(
+                EvalResult(
+                    compiled=(ev.status != EvaluationStatus.COMPILE_ERROR),
+                    task_id=task_id,
+                    error=f"{ev.status.value}: {ev.log}",
+                    stats={"trace_evaluations": _summarize_traces(traces)},
+                )
             )
 
     # Aggregate PASSED results
@@ -224,23 +294,29 @@ def eval_kernel(
             abs_errors.append(ev.correctness.max_absolute_error)
 
     if not latencies:
-        return EvalResult(
-            task_id=task_id,
-            error="No evaluation results",
+        return _attach_diagnostics(
+            EvalResult(
+                task_id=task_id,
+                error="No evaluation results",
+                stats={"trace_evaluations": _summarize_traces(traces)},
+            )
         )
 
     n = len(latencies)
     avg_speedup = sum(speedups) / n
-    return EvalResult(
-        compiled=True,
-        correct=True,
-        speedup=avg_speedup,
-        latency_ms=sum(latencies) / n,
-        task_id=task_id,
-        stats={
-            "reference_latency_ms": sum(ref_latencies) / n,
-            "max_relative_error": sum(rel_errors) / n,
-            "max_absolute_error": sum(abs_errors) / n,
-            "total_workloads": n,
-        },
+    return _attach_diagnostics(
+        EvalResult(
+            compiled=True,
+            correct=True,
+            speedup=avg_speedup,
+            latency_ms=sum(latencies) / n,
+            task_id=task_id,
+            stats={
+                "reference_latency_ms": sum(ref_latencies) / n,
+                "max_relative_error": sum(rel_errors) / n,
+                "max_absolute_error": sum(abs_errors) / n,
+                "total_workloads": n,
+                "trace_evaluations": _summarize_traces(traces),
+            },
+        )
     )
