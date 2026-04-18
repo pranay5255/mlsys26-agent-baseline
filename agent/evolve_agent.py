@@ -1,4 +1,4 @@
-# Evolve Agent: propose kernels in a pool, evolve with elite selection
+# Evolve Agent: propose CuTe DSL solutions in a pool, evolve with elite selection
 
 import argparse
 import json
@@ -104,7 +104,7 @@ def run_evolve_loop(
     args: argparse.Namespace,
     log_path: str = None,
 ):
-    """Run the evolve loop: propose kernels, maintain elite pool, optionally refine."""
+    """Run the evolve loop: propose solutions, maintain elite pool, optionally refine."""
     start_step = 0
     kernel_pool: list[str] = []
     metrics_pool: list[EvalResult] = []
@@ -128,7 +128,7 @@ def run_evolve_loop(
         if start_step >= args.proposal_steps and elite_pool:
             logger.info(
                 f"Resume already reached target total_steps={args.proposal_steps}, "
-                "returning cached best kernel"
+                "returning cached best solution"
             )
             return elite_pool[0], elite_metrics_pool[0]
 
@@ -237,9 +237,7 @@ def run_evolve_loop(
                     "elite": len(elite_context_ids),
                 },
                 "compiled": proposal_metrics.compiled if proposal_metrics else False,
-                "correct": (
-                    proposal_metrics.correct if proposal_metrics else False
-                ),
+                "correct": (proposal_metrics.correct if proposal_metrics else False),
                 "speedup": proposal_metrics.speedup if proposal_metrics else 0.0,
                 "score": calculate_score(proposal_metrics),
             }
@@ -266,7 +264,7 @@ def run_evolve_loop(
         metrics_pool.append(local_best_metrics)
         proposal_ids.append(i + 1)
 
-        # Maintain a separately sorted elite pool for best-kernel context
+        # Maintain a separately sorted elite pool for best-solution context
         sorted_data = sorted(
             zip(kernel_pool, metrics_pool, proposal_ids),
             key=lambda x: calculate_score(x[1]),
@@ -278,6 +276,6 @@ def run_evolve_loop(
         elite_proposal_ids = list(elite_proposal_ids)
 
     if len(elite_pool) == 0:
-        raise ValueError("No kernels were generated; empty pool.")
+        raise ValueError("No solutions were generated; empty pool.")
 
     return elite_pool[0], elite_metrics_pool[0]
