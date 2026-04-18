@@ -150,6 +150,20 @@ def build_experiment_parser(experiment: DsaPs1Experiment) -> argparse.ArgumentPa
     parser.add_argument("--eval_num_trials", type=int, default=1)
     parser.add_argument("--max_completion_tokens", type=int, default=16384)
     parser.add_argument("--resume_from", default=None)
+    parser.add_argument(
+        "--focus_append",
+        action="append",
+        default=[],
+        help=(
+            "Extra prompt guidance appended to the built-in experiment focus. "
+            "Can be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--focus_override",
+        default=None,
+        help="Replace the built-in experiment focus passed to --experiment_focus.",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--skip_smoke", action="store_true")
     parser.add_argument("--smoke_only", action="store_true")
@@ -157,9 +171,22 @@ def build_experiment_parser(experiment: DsaPs1Experiment) -> argparse.ArgumentPa
     return parser
 
 
+def build_experiment_focus(
+    experiment: DsaPs1Experiment, args: argparse.Namespace
+) -> str:
+    """Return prompt guidance for the wrapped experiment command."""
+    focus = args.focus_override or experiment.focus
+    if args.focus_append:
+        focus += "\n\nAdditional experiment guidance:\n" + "\n".join(
+            f"- {item}" for item in args.focus_append
+        )
+    return focus
+
+
 def build_agent_argv(
     experiment: DsaPs1Experiment, args: argparse.Namespace
 ) -> list[str]:
+    experiment_focus = build_experiment_focus(experiment, args)
     argv = [
         "--config",
         args.config,
@@ -200,7 +227,7 @@ def build_agent_argv(
         "--save_path",
         args.save_path,
         "--experiment_focus",
-        experiment.focus,
+        experiment_focus,
     ]
     if args.resume_from:
         argv.extend(["--resume_from", args.resume_from])
