@@ -14,6 +14,7 @@ from prompt.tuner_prompt import generate_tuner_prompt
 from scripts.dsa_ps1_experiment_common import (
     ATTENTION_FUSED,
     build_agent_argv,
+    build_experiment_focus,
     build_experiment_parser,
 )
 
@@ -113,6 +114,7 @@ import cutlass.cute as cute
 def launch_kernel(grid, block, smem_size, stream):
     x = cute.load(ptr, 0)
     cute.store(out, 0, x)
+    y = cute.arch.shared_memory(0, cute.float32, (32,))
     kernel[grid, block, smem_size, stream](ptr, out)
 """
 
@@ -120,7 +122,25 @@ def launch_kernel(grid, block, smem_size, stream):
 
     assert any("cute.load is not available" in issue for issue in issues)
     assert any("cute.store is not available" in issue for issue in issues)
+    assert any("cute.arch.shared_memory is not available" in issue for issue in issues)
     assert any("bracket kernel launch is not valid" in issue for issue in issues)
+
+
+def test_find_cute_source_issues_flags_kernel_runtime_traps():
+    source = """
+import cutlass.cute as cute
+
+@cute.kernel
+def kernel(x, n):
+    if n > 0:
+        return
+    y = int(x)
+"""
+
+    issues = find_cute_source_issues(source)
+
+    assert any("return is not allowed inside @cute.kernel" in issue for issue in issues)
+    assert any("int(...) inside @cute.kernel" in issue for issue in issues)
 
 
 def test_tuner_prompt_preserves_edit_protocol_and_cute_constraints():
@@ -193,6 +213,28 @@ def test_python_experiment_script_builds_modal_agent_argv():
     assert argv[argv.index("--modal_gpu") + 1] == "B200"
     assert "--experiment_focus" in argv
     assert "online or chunked reduction" in argv[argv.index("--experiment_focus") + 1]
+
+
+def test_python_experiment_script_accepts_prompt_focus_append_and_override():
+    parser = build_experiment_parser(ATTENTION_FUSED)
+    args = parser.parse_args(
+        [
+            "--focus_append",
+            "avoid early return",
+            "--focus_append",
+            "avoid arch shared memory",
+        ]
+    )
+    focus = build_experiment_focus(ATTENTION_FUSED, args)
+
+    assert "online or chunked reduction" in focus
+    assert "avoid early return" in focus
+    assert "avoid arch shared memory" in focus
+
+    override_args = parser.parse_args(["--focus_override", "minimal compile-first"])
+    override_focus = build_experiment_focus(ATTENTION_FUSED, override_args)
+
+    assert override_focus == "minimal compile-first"
 
 
 def test_openrouter_client_uses_openrouter_key_and_base_url(monkeypatch):
