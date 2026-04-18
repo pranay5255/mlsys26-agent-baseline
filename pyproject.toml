@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlsys26-agent-baseline"
+version = "0.1.0"
+description = "LLM agent baseline for generating CuTe DSL kernels for FlashInfer Bench tasks."
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = { file = "LICENSE" }
+dependencies = [
+    "anthropic",
+    "flashinfer-bench",
+    "modal",
+    "nvidia-cutlass-dsl[cu13]",
+    "numpy",
+    "openai",
+    "pydantic",
+    "python-dotenv",
+    "pyyaml",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "pre-commit",
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+mlsys-agent = "agent.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent", "prompt"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
