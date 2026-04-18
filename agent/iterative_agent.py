@@ -9,6 +9,7 @@ import shutil
 from tqdm import tqdm
 
 from agent.api import query_inference_server
+from agent.diagnostics import diagnostics_for_metric
 from agent.eval import EvalResult, calculate_score
 from agent.utils import (
     extract_edits,
@@ -194,7 +195,7 @@ def copy_step_files(src_path: str, dst_path: str, max_step: int = 0):
 
     for step_idx in range(1, max_step + 1):
         for prefix in ["proposal", "tune"]:
-            for suffix in [".py", "_metrics.json", "_prompt.txt"]:
+            for suffix in [".py", "_metrics.json", "_diagnostics.json", "_prompt.txt"]:
                 src_file = os.path.join(src_path, f"{prefix}_0_{step_idx}{suffix}")
                 if os.path.exists(src_file):
                     dst_file = os.path.join(dst_path, f"{prefix}_0_{step_idx}{suffix}")
@@ -203,13 +204,15 @@ def copy_step_files(src_path: str, dst_path: str, max_step: int = 0):
 
 
 def _save_step(log_path, prefix, kernel, metrics, prompt_text):
-    """Save solution source, metrics JSON, and prompt for a single step."""
+    """Save solution source, metrics JSON, diagnostics JSON, and prompt."""
     if log_path is None:
         return
     with open(os.path.join(log_path, f"{prefix}.py"), "w") as f:
         f.write(kernel)
     with open(os.path.join(log_path, f"{prefix}_metrics.json"), "w") as f:
         json.dump(metrics.model_dump(), f)
+    with open(os.path.join(log_path, f"{prefix}_diagnostics.json"), "w") as f:
+        json.dump(diagnostics_for_metric(metrics), f, indent=2)
     with open(os.path.join(log_path, f"{prefix}_prompt.txt"), "w") as f:
         f.write(prompt_text)
 
