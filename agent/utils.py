@@ -1,7 +1,9 @@
 import argparse
+import io
 import json
 import os
 import re
+import tokenize
 
 import yaml
 
@@ -23,6 +25,126 @@ DATASET_ROOT_CANDIDATES = {
     ],
 }
 
+CUTE_DSL_SOURCE_SCAFFOLDING = """## Compile-Safe CuTe DSL Scaffold
+
+Use this source structure for every generated solution so exploration starts
+from a known-valid CuTe import, launch, stream, and cache pattern. The code
+block below is valid Python; adapt the same patterns to the real kernel instead
+of inventing import paths or launch syntax:
+
+```python
+import torch
+import cutlass
+import cutlass.cute as cute
+from cutlass.cute.runtime import from_dlpack
+
+_COMPILED = {}
+
+
+def _tensor_cache_part(tensor):
+    return (
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        str(tensor.dtype),
+        tensor.device.type,
+        tensor.device.index,
+    )
+
+
+def _cache_key(*tensors, **params):
+    return tuple(_tensor_cache_part(t) for t in tensors) + tuple(sorted(params.items()))
+
+
+@cute.kernel
+def compile_probe_kernel():
+    tid = cute.arch.thread_idx()[0]
+    bid = cute.arch.block_idx()[0]
+    bdim = cute.arch.block_dim()[0]
+    cute.arch.sync_threads()
+
+
+@cute.jit
+def launch_compile_probe(stream):
+    compile_probe_kernel().launch(
+        grid=(1, 1, 1),
+        block=(1, 1, 1),
+        stream=stream,
+    )
+
+
+def _get_compiled(key, jit_fn, *compile_args):
+    compiled = _COMPILED.get(key)
+    if compiled is None:
+        compiled = cute.compile(jit_fn, *compile_args)
+        _COMPILED[key] = compiled
+    return compiled
+
+
+def _compile_probe_once():
+    stream = cutlass.cuda.default_stream()
+    compiled = _get_compiled(("compile_probe",), launch_compile_probe, stream)
+    compiled(stream)
+    cutlass.cuda.stream_sync(stream)
+```
+
+For the real implementation, define task-specific `@cute.kernel` and `@cute.jit`
+functions at module scope, convert tensors with `from_dlpack` only when needed,
+launch with `real_kernel(args...).launch(grid=..., block=..., stream=stream)`,
+compile through `cute.compile`, cache by `_cache_key`, and return outputs from a
+plain Python `run` wrapper. The probe above is only a minimal API shape example;
+do not call a separate probe from the final `run` path because benchmark warmup
+and timed iterations should compile and execute the task kernel itself.
+"""
+
+CUTE_SOURCE_IMPORT_REPLACEMENTS = {
+    "from cutlass.cute import from_dlpack": (
+        "from cutlass.cute.runtime import from_dlpack"
+    ),
+    "from cutlass import from_dlpack": "from cutlass.cute.runtime import from_dlpack",
+    "from cutlass.cuda import default_stream": "",
+    "from cutlass.cute.cuda import default_stream": "",
+}
+
+CUTE_SOURCE_API_REPLACEMENTS = {
+    "stream.synchronize()": "cutlass.cuda.stream_sync(stream)",
+    "cute.threadIdx.x": "cute.arch.thread_idx()[0]",
+    "cute.threadIdx.y": "cute.arch.thread_idx()[1]",
+    "cute.threadIdx.z": "cute.arch.thread_idx()[2]",
+    "cute.blockIdx.x": "cute.arch.block_idx()[0]",
+    "cute.blockIdx.y": "cute.arch.block_idx()[1]",
+    "cute.blockIdx.z": "cute.arch.block_idx()[2]",
+    "cute.blockDim.x": "cute.arch.block_dim()[0]",
+    "cute.blockDim.y": "cute.arch.block_dim()[1]",
+    "cute.blockDim.z": "cute.arch.block_dim()[2]",
+    "cute.gridDim.x": "cute.arch.grid_dim()[0]",
+    "cute.gridDim.y": "cute.arch.grid_dim()[1]",
+    "cute.gridDim.z": "cute.arch.grid_dim()[2]",
+    "cute.syncthreads()": "cute.arch.sync_threads()",
+}
+
+CUTE_SOURCE_FORBIDDEN_PATTERNS = {
+    "cute.load(": (
+        "cute.load is not available in the installed CuTe DSL; convert inputs "
+        "with from_dlpack or direct JIT arguments and use CuTe tensor indexing."
+    ),
+    "cute.store(": (
+        "cute.store is not available in the installed CuTe DSL; write through "
+        "CuTe tensor indexing or supported copy/tensor APIs."
+    ),
+    "cute.shared_memory": (
+        "cute.shared_memory is not available as a direct helper in this CuTe "
+        "DSL environment; use documented CuTe tensor/layout or nvgpu memory "
+        "APIs only when constructing shared-memory tiles correctly."
+    ),
+}
+
+CUTE_SOURCE_FORBIDDEN_REGEXES = {
+    r"\b\w+\s*\[[^\]\n]*grid[^\]\n]*block[^\]\n]*stream[^\]\n]*\]\s*\(": (
+        "Triton/CUDA-style bracket kernel launch is not valid CuTe DSL; call "
+        "kernel(args...).launch(grid=..., block=..., smem=..., stream=...)."
+    ),
+}
+
 
 def extract_first_code(output_string: str, code_language_types: list[str]) -> str:
     """
@@ -39,6 +161,76 @@ def extract_first_code(output_string: str, code_language_types: list[str]) -> st
         return code
 
     return output_string
+
+
+def normalize_cute_source(source: str) -> str:
+    """Normalize common CuTe DSL import/stream mistakes in generated code."""
+    normalized = source
+    for old, new in CUTE_SOURCE_IMPORT_REPLACEMENTS.items():
+        normalized = normalized.replace(old, new)
+    for old, new in CUTE_SOURCE_API_REPLACEMENTS.items():
+        normalized = normalized.replace(old, new)
+    normalized = re.sub(
+        r"(?<![\w.])default_stream\(\)",
+        "cutlass.cuda.default_stream()",
+        normalized,
+    )
+
+    lines = []
+    seen_runtime_dlpack_import = False
+    for line in normalized.splitlines():
+        if line == "from cutlass.cute.runtime import from_dlpack":
+            if seen_runtime_dlpack_import:
+                continue
+            seen_runtime_dlpack_import = True
+        lines.append(line)
+    normalized = "\n".join(lines)
+
+    has_cutlass_import = re.search(r"^import\s+cutlass(\s|$)", normalized, re.MULTILINE)
+    if "cutlass.cuda." in normalized and not has_cutlass_import:
+        normalized = "import cutlass\n" + normalized
+
+    return normalized
+
+
+def _source_without_strings_and_comments(source: str) -> str:
+    """Return source text suitable for simple static scans."""
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        return "".join(
+            " " if token.type in {tokenize.STRING, tokenize.COMMENT} else token.string
+            for token in tokens
+        )
+    except tokenize.TokenError:
+        return source
+
+
+def _line_number(source: str, index: int) -> int:
+    return source.count("\n", 0, max(index, 0)) + 1
+
+
+def find_cute_source_issues(source: str) -> list[str]:
+    """Find known CuTe DSL API mistakes before spending a GPU compile."""
+    scan_source = _source_without_strings_and_comments(source)
+    issues = []
+
+    for pattern, message in CUTE_SOURCE_FORBIDDEN_PATTERNS.items():
+        index = scan_source.find(pattern)
+        if index != -1:
+            issues.append(f"line {_line_number(scan_source, index)}: {message}")
+
+    for pattern, message in CUTE_SOURCE_FORBIDDEN_REGEXES.items():
+        match = re.search(pattern, scan_source)
+        if match:
+            issues.append(f"line {_line_number(scan_source, match.start())}: {message}")
+
+    return issues
+
+
+def prepare_cute_source_for_eval(source: str) -> tuple[str, list[str]]:
+    """Normalize generated CuTe source and return static preflight issues."""
+    normalized = normalize_cute_source(source)
+    return normalized, find_cute_source_issues(normalized)
 
 
 def str_replace(
@@ -139,7 +331,8 @@ def get_dataset_root(test_source: str) -> str:
 
 
 def construct_flashinfer_trace_dataset(
-    op_type: str, dataset_root: str = None,
+    op_type: str,
+    dataset_root: str = None,
 ) -> list[str]:
     """Return sorted list of problem names for given op_type."""
     if dataset_root is None:
@@ -174,7 +367,8 @@ def load_test_source(test_source: str, level, problem_id):
 
 
 def load_tasks_from_test_list(
-    tasks_path: str, test_source: str = "mlsys26-contest",
+    tasks_path: str,
+    test_source: str = "mlsys26-contest",
 ) -> list[dict]:
     """
     Load tasks from a test list file.
@@ -196,7 +390,9 @@ def load_tasks_from_test_list(
         parts = line.split(" ", 1)
         level = parts[0]
         if len(parts) == 1:
-            problems = construct_flashinfer_trace_dataset(level, dataset_root=dataset_root)
+            problems = construct_flashinfer_trace_dataset(
+                level, dataset_root=dataset_root
+            )
         else:
             problems = [p.strip() for p in parts[1].split(",") if p.strip()]
         tasks.extend({"level": level, "problem_id": str(p)} for p in problems)
@@ -205,7 +401,9 @@ def load_tasks_from_test_list(
 
 
 def load_config_from_yaml(
-    args: argparse.Namespace, parser: argparse.ArgumentParser
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    argv: list[str] | None = None,
 ) -> argparse.Namespace:
     """
     Load configuration from YAML file and update args.
@@ -219,4 +417,4 @@ def load_config_from_yaml(
 
     # Set YAML values as new defaults, then re-parse so CLI args override them
     parser.set_defaults(**{k: v for k, v in config_dict.items() if hasattr(args, k)})
-    return parser.parse_args()
+    return parser.parse_args(argv)
