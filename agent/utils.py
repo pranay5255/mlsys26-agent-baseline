@@ -1,4 +1,5 @@
 import argparse
+import ast
 import io
 import json
 import os
@@ -136,6 +137,11 @@ CUTE_SOURCE_FORBIDDEN_PATTERNS = {
         "DSL environment; use documented CuTe tensor/layout or nvgpu memory "
         "APIs only when constructing shared-memory tiles correctly."
     ),
+    "cute.arch.shared_memory": (
+        "cute.arch.shared_memory is not available in this CuTe DSL environment; "
+        "avoid direct shared-memory helpers unless using documented nvgpu/CuTe "
+        "memory APIs correctly."
+    ),
 }
 
 CUTE_SOURCE_FORBIDDEN_REGEXES = {
@@ -209,6 +215,49 @@ def _line_number(source: str, index: int) -> int:
     return source.count("\n", 0, max(index, 0)) + 1
 
 
+def _is_cute_kernel_decorator(decorator: ast.expr) -> bool:
+    return (
+        isinstance(decorator, ast.Attribute)
+        and decorator.attr == "kernel"
+        and isinstance(decorator.value, ast.Name)
+        and decorator.value.id == "cute"
+    )
+
+
+def _find_cute_kernel_ast_issues(source: str) -> list[str]:
+    """Find unsupported AST patterns inside @cute.kernel functions."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    issues = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not any(_is_cute_kernel_decorator(dec) for dec in node.decorator_list):
+            continue
+
+        for child in ast.walk(node):
+            if isinstance(child, ast.Return):
+                issues.append(
+                    f"line {child.lineno}: return is not allowed inside @cute.kernel; "
+                    "guard work with predicates instead of early exits."
+                )
+            elif (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "int"
+            ):
+                issues.append(
+                    f"line {child.lineno}: int(...) inside @cute.kernel often "
+                    "tries to convert dynamic DSL values to Python integers; "
+                    "keep values in CuTe/DSL scalar form."
+                )
+
+    return issues
+
+
 def find_cute_source_issues(source: str) -> list[str]:
     """Find known CuTe DSL API mistakes before spending a GPU compile."""
     scan_source = _source_without_strings_and_comments(source)
@@ -224,6 +273,7 @@ def find_cute_source_issues(source: str) -> list[str]:
         if match:
             issues.append(f"line {_line_number(scan_source, match.start())}: {message}")
 
+    issues.extend(_find_cute_kernel_ast_issues(source))
     return issues
 
 
