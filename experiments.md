@@ -12,12 +12,31 @@ OpenRouter, and `config/tasks_mini.txt`. The wrappers also pass their built-in
 experiment objective to the prompts through `--experiment_focus`.
 
 The default fused command can complete successfully while still producing
-`Correct: False`. That means the command ran, but the LLM-generated CuTe DSL
-candidate failed correctness or runtime checks. The recent failed run produced
-runtime errors from unsupported patterns including early `return` inside
-`@cute.kernel`, `cute.arch.shared_memory`, direct `cute.load`/`cute.store`, and
-`int(...)` on dynamic DSL values. Prefer the compile-first commands below before
-running broad search.
+`Correct: False`. That means the command ran, but the LLM-generated host
+Python/CuTe DSL code failed while compiling or launching GPU work.
+
+The 14-step `dsa_ps1_attention_fused_deep` run did not reach a WGMMA/TMA/TMEM
+GPU illegal-instruction failure. Its saved metrics show source preflight and
+CuTe DSL host-side lowering failures:
+
+- unsupported helpers: `cute.load`, `cute.store`, `cute.StaticBuffer`,
+  `cute.alloc_shared`, `cute.range_dynamic`, `cute.tensor_view`, `cute.maximum`
+- illegal kernel control flow: early `return` inside `@cute.kernel`
+- host/dynamic scalar confusion: `int(...)` on DSL values, Python annotations
+  such as `num_tokens: int` or `sm_scale: float` on decorated CuTe functions,
+  and `ArithValue` being used where Python expects an `int`
+
+Current `agent/utils.py` fixes strip leaked XML tags, deduplicate edit IDs,
+strip `@cute.kernel` / `@cute.jit` scalar annotations, and preflight more
+hallucinated CuTe APIs (`StaticBuffer`, `alloc_shared`, `ld_global`,
+`st_global`, `range_dynamic`, `tensor_view`, `maximum`, `make_shape`,
+`make_layout`). After those fixes, the next rerun is expected to get past the
+old `Int32`/`Float32` annotation mismatch and fail, if at all, on remaining
+unsupported APIs, correctness, or real GPU runtime behavior.
+
+Prefer the compile-first commands below before running broad search. NCU is only
+useful after a GPU kernel actually launches; before that, inspect the structured
+diagnostics and CuTe DSL compile logs.
 
 ## Preconditions
 
@@ -66,7 +85,109 @@ while adding lessons from failed candidates.
 Common compile-first guidance:
 
 ```bash
---focus_append 'Compile-first constraints: do not use cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, bracket launch syntax, early return inside @cute.kernel, or int(...) on dynamic CuTe DSL values. Use module-scope @cute.kernel and @cute.jit, cute.arch thread/block builtins, from_dlpack only from cutlass.cute.runtime, cutlass.cuda.default_stream(), cutlass.cuda.stream_sync(stream), and kernel(args...).launch(grid=..., block=..., stream=...).'
+--focus_append 'Compile-first constraints: do not use cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, cute.StaticBuffer, cute.alloc_shared, cute.range_dynamic, cute.tensor_view, cute.maximum, cute.make_shape, cute.make_layout, bracket launch syntax, early return inside @cute.kernel, int(...) on dynamic CuTe DSL values, or Python scalar annotations on @cute.jit/@cute.kernel parameters. Use module-scope @cute.kernel and @cute.jit, cute.arch thread/block builtins, from_dlpack only from cutlass.cute.runtime, cutlass.cuda.default_stream(), cutlass.cuda.stream_sync(stream), and kernel(args...).launch(grid=..., block=..., stream=...). Keep fixed DSA sizes as literals or validated compile-time constants until a simple scalar kernel compiles.'
+```
+
+## Diagnostics And Profiling
+
+Every new experiment writes structured diagnostics next to each proposal:
+
+- `proposal_N_metrics.json`: raw evaluator result and full error log
+- `proposal_N_diagnostics.json`: classified failure level, likely cause, and
+  missing evidence
+- `global_best_diagnostics_N.json`: diagnostics for the selected best candidate
+
+Read diagnostics before rerunning:
+
+```bash
+python -m json.tool outputs/experiments/dsa_ps1_attention_fused_deep/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/failure_diagnostics_summary.json
+python -m json.tool outputs/experiments/dsa_ps1_attention_fused_deep/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_2_diagnostics.json
+```
+
+Use NCU only for candidates that reach a GPU launch. For a candidate that still
+fails in CuTe DSL lowering, first collect the remote host-side compile log
+without NCU:
+
+```bash
+uv run python scripts/profile_modal_ncu.py \
+  --kernel_path outputs/experiments/dsa_ps1_attention_fused_deep/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_2.py \
+  --run_name proposal_2_compile_log \
+  --profiler none \
+  --timeout 900 \
+  --eval_timeout 480 \
+  --warmup_runs 1 \
+  --iterations 1 \
+  --num_trials 1
+```
+
+If you intentionally want NCU evidence for the whole process, bound the launch
+window. An unbounded `--set full` run can spend many replay passes on reference
+PyTorch/CUTLASS kernels before the generated candidate is reached:
+
+```bash
+uv run python scripts/profile_modal_ncu.py \
+  --kernel_path outputs/experiments/dsa_ps1_attention_fused_deep/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_2.py \
+  --run_name proposal_2_ncu_compile \
+  --timeout 900 \
+  --eval_timeout 480 \
+  --warmup_runs 1 \
+  --iterations 1 \
+  --num_trials 1 \
+  --ncu_launch_skip 0 \
+  --ncu_launch_count 20
+```
+
+For proposals stopped by the local preflight, use `--allow_static_issues` only
+when you explicitly want raw remote compiler logs despite knowing no kernel will
+launch:
+
+```bash
+uv run python scripts/profile_modal_ncu.py \
+  --kernel_path outputs/experiments/dsa_ps1_attention_fused_deep/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_14.py \
+  --run_name proposal_14_forced_compile_log \
+  --allow_static_issues \
+  --timeout 900 \
+  --eval_timeout 480 \
+  --warmup_runs 1 \
+  --iterations 1 \
+  --num_trials 1
+```
+
+Once diagnostics show a candidate reaches actual GPU execution, profile the full
+benchmark process with a bounded launch window:
+
+```bash
+uv run python scripts/profile_modal_ncu.py \
+  --kernel_path outputs/experiments/<run>/<level_problem>/global_best_kernel_<steps>.py \
+  --run_name global_best_ncu_full \
+  --timeout 1200 \
+  --eval_timeout 480 \
+  --warmup_runs 1 \
+  --iterations 1 \
+  --num_trials 1 \
+  --ncu_launch_skip 0 \
+  --ncu_launch_count 50
+```
+
+## Rerun After Utility Fixes
+
+If OpenRouter credits ran out during a v2 run, top up the key, keep the same
+Modal/CuTe settings, and write to a new save path so the old diagnostics remain
+comparable:
+
+```bash
+uv run python scripts/run_dsa_ps1_attention_fused.py \
+  --skip_smoke \
+  --total_steps 14 \
+  --pool_size 8 \
+  --temperature 0.45 \
+  --eval_timeout 480 \
+  --eval_warmup_runs 5 \
+  --eval_iterations 10 \
+  --eval_num_trials 3 \
+  --max_completion_tokens 24000 \
+  --save_path outputs/experiments/dsa_ps1_attention_fused_deep_v2 \
+  --focus_append 'Post-utils-fix rerun. XML edit tags and decorated CuTe scalar annotations are normalized before evaluation; do not reintroduce unsupported CuTe helper APIs caught by preflight. First goal is a scalar CuTe kernel that compiles and launches, then correctness, then WGMMA/TMA/TMEM tiling only if diagnostics show the host-to-GPU path is clean.'
 ```
 
 ## Fused Sparse Attention
@@ -89,7 +210,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --eval_num_trials 1 \
   --max_completion_tokens 16000 \
   --save_path outputs/experiments/dsa_ps1_attention_fused_compile_first \
-  --focus_append 'Compile-first constraints: do not use cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, bracket launch syntax, early return inside @cute.kernel, or int(...) on dynamic CuTe DSL values. If a boundary check is needed, predicate work instead of returning. Prefer a simple valid CuTe DSL kernel over aggressive shared-memory tiling.'
+  --focus_append 'Compile-first constraints: do not use cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, cute.StaticBuffer, cute.alloc_shared, cute.range_dynamic, cute.tensor_view, cute.maximum, cute.make_shape, cute.make_layout, bracket launch syntax, early return inside @cute.kernel, int(...) on dynamic CuTe DSL values, or Python scalar annotations on @cute.jit/@cute.kernel parameters. If a boundary check is needed, predicate work instead of returning. Prefer a simple valid CuTe DSL kernel over aggressive shared-memory tiling, WGMMA, TMA, or TMEM.'
 ```
 
 Runtime-debug run with CuTe logs:
@@ -106,7 +227,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --eval_iterations 2 \
   --eval_num_trials 1 \
   --save_path outputs/experiments/dsa_ps1_attention_fused_debug \
-  --focus_append 'Debug runtime failures. Avoid early return in @cute.kernel, avoid cute.arch.shared_memory, avoid Python int() conversion of DSL values, and keep dynamic tensor values in CuTe scalar form.'
+  --focus_append 'Debug compile/runtime failures at the host-to-GPU boundary. Avoid unsupported CuTe helpers, early return in @cute.kernel, Python int() conversion of DSL values, and Python scalar annotations on decorated CuTe function parameters. Keep dynamic tensor values in CuTe scalar form and use diagnostics JSON to classify whether the failure is source preflight, CuTe lowering, GPU runtime, or correctness.'
 ```
 
 Broader fused exploration after at least one candidate compiles:
@@ -123,7 +244,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --eval_num_trials 1 \
   --max_completion_tokens 22000 \
   --save_path outputs/experiments/dsa_ps1_attention_fused_explore \
-  --focus_append 'Preserve compile-first constraints from the failed run. Explore online or chunked softmax and value accumulation only after the CuTe launch, tensor conversion, and kernel control flow are valid.'
+  --focus_append 'Preserve compile-first constraints from the failed run. Do not introduce WGMMA/TMA/TMEM tiling until the scalar CuTe launch, tensor conversion, decorated function signatures, and kernel control flow are valid. Explore online or chunked softmax and value accumulation only after a simple candidate compiles and launches.'
 ```
 
 Deep fused benchmark run:
@@ -140,7 +261,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --eval_num_trials 3 \
   --max_completion_tokens 24000 \
   --save_path outputs/experiments/dsa_ps1_attention_fused_deep \
-  --focus_append 'Benchmark-stability run. Reuse module-level cute.compile caches in timed iterations and avoid new APIs unless already validated by a smaller run.'
+  --focus_append 'Benchmark-stability run. Reuse module-level cute.compile caches in timed iterations and avoid new CuTe APIs unless already validated by a smaller run. Carry forward compile-first constraints: no unsupported helper APIs, no Python scalar annotations on decorated CuTe functions, no dynamic DSL value converted to Python int, and no WGMMA/TMA/TMEM path until a scalar fused kernel has launched correctly.'
 ```
 
 ## Softmax And LSE
@@ -161,7 +282,7 @@ uv run python scripts/run_dsa_ps1_softmax_lse.py \
   --eval_num_trials 1 \
   --max_completion_tokens 16000 \
   --save_path outputs/experiments/dsa_ps1_softmax_lse_compile_first \
-  --focus_append 'Compile-first softmax/LSE. Prefer a simple two-pass max then sumexp implementation over aggressive fusion. Avoid cute.load, cute.store, shared-memory helper guesses, early return inside @cute.kernel, and int(...) on dynamic DSL values.'
+  --focus_append 'Compile-first softmax/LSE. Prefer a simple two-pass max then sumexp implementation over aggressive fusion. Avoid unsupported CuTe helper guesses, early return inside @cute.kernel, Python scalar annotations on decorated CuTe functions, and int(...) on dynamic DSL values.'
 ```
 
 Online softmax exploration:
@@ -178,7 +299,7 @@ uv run python scripts/run_dsa_ps1_softmax_lse.py \
   --eval_num_trials 1 \
   --max_completion_tokens 22000 \
   --save_path outputs/experiments/dsa_ps1_softmax_lse_online \
-  --focus_append 'Explore online softmax only with valid CuTe DSL control flow. Maintain running max and denominator in fp32, mask sparse_indices == -1 before max and denominator updates, and store lse as logsumexp / log(2).'
+  --focus_append 'Explore online softmax only after valid CuTe DSL control flow and decorated function signatures are established. Maintain running max and denominator in fp32, mask sparse_indices == -1 before max and denominator updates, and store lse as logsumexp / log(2).'
 ```
 
 Deep softmax/LSE benchmark run:
@@ -217,7 +338,7 @@ uv run python scripts/run_dsa_ps1_rmsnorm_reduction.py \
   --eval_num_trials 1 \
   --max_completion_tokens 16000 \
   --save_path outputs/experiments/dsa_ps1_rmsnorm_reduction_compile_first \
-  --focus_append 'Compile-first row reduction. Do not implement RMSNorm. Use the RMSNorm analogy only for stable per-row fp32 reductions and reciprocal normalization. Avoid unsupported shared-memory helpers, early return, and Python int conversion of dynamic DSL values.'
+  --focus_append 'Compile-first row reduction. Do not implement RMSNorm. Use the RMSNorm analogy only for stable per-row fp32 reductions and reciprocal normalization. Avoid unsupported shared-memory helpers, unsupported CuTe helper APIs, early return, Python scalar annotations on decorated CuTe functions, and Python int conversion of dynamic DSL values.'
 ```
 
 Reduction-pattern exploration:
@@ -234,7 +355,7 @@ uv run python scripts/run_dsa_ps1_rmsnorm_reduction.py \
   --eval_num_trials 1 \
   --max_completion_tokens 22000 \
   --save_path outputs/experiments/dsa_ps1_rmsnorm_reduction_explore \
-  --focus_append 'Explore deterministic reduction trees and reciprocal normalization patterns while preserving sparse attention semantics and base-2 LSE output.'
+  --focus_append 'Explore deterministic reduction trees and reciprocal normalization patterns while preserving sparse attention semantics and base-2 LSE output. Keep the implementation on validated scalar CuTe DSL control flow before adding tiling or warpgroup-level instructions.'
 ```
 
 Deep reduction benchmark run:
@@ -268,7 +389,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --pool_size 1 \
   --temperature 0.25 \
   --save_path outputs/experiments/dsa_ps1_attention_minimal_valid \
-  --focus_override 'Generate the simplest valid CuTe DSL solution for the DSA ps1 task. Prioritize compiling and returning correctly shaped tensors over speed. Avoid cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, early return inside @cute.kernel, and int(...) on dynamic DSL values. Use the documented scaffold exactly for imports, stream, compile cache, and launch syntax.'
+  --focus_override 'Generate the simplest valid CuTe DSL solution for the DSA ps1 task. Prioritize compiling and returning correctly shaped tensors over speed. Avoid cute.load, cute.store, cute.shared_memory, cute.arch.shared_memory, cute.StaticBuffer, cute.alloc_shared, cute.range_dynamic, cute.tensor_view, cute.maximum, cute.make_shape, cute.make_layout, early return inside @cute.kernel, int(...) on dynamic DSL values, and Python scalar annotations on @cute.jit/@cute.kernel parameters. Use the documented scaffold exactly for imports, stream, compile cache, and launch syntax.'
 ```
 
 ## Resume Commands
@@ -283,7 +404,7 @@ uv run python scripts/run_dsa_ps1_attention_fused.py \
   --pool_size 5 \
   --temperature 0.45 \
   --save_path outputs/experiments/dsa_ps1_attention_fused_resume_8 \
-  --focus_append 'Continue from prior attempts. Avoid repeating any runtime-error pattern reported in previous metrics.'
+  --focus_append 'Continue from prior attempts. Read proposal diagnostics and avoid repeating any source_preflight or cute_dsl_compiler pattern reported in previous metrics, especially unsupported helper APIs, decorated scalar annotations, and Python int conversion of DSL values.'
 ```
 
 ## Reading Results
@@ -292,6 +413,7 @@ After a run, inspect metrics before launching a deeper run:
 
 ```bash
 python -m json.tool outputs/experiments/dsa_ps1_attention_fused_compile_first/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_1_metrics.json
+python -m json.tool outputs/experiments/dsa_ps1_attention_fused_compile_first/dsa_paged_dsa_sparse_attention_h16_ckv512_kpe64_topk2048_ps1/proposal_1_diagnostics.json
 ```
 
 Useful failure meanings:
@@ -304,3 +426,9 @@ Useful failure meanings:
   compilation through `cute.compile`, or kernel execution.
 - `Correct: False` with completed app: the infrastructure worked; the generated
   candidate was not yet correct.
+- `source_preflight` in diagnostics: host Python source was rejected before any
+  B200 compile.
+- `cute_dsl_compiler` in diagnostics: host CuTe DSL lowering failed before a GPU
+  kernel could be profiled.
+- `gpu_runtime` in diagnostics: a GPU kernel launched and failed on-device; this
+  is the point where NCU/NSYS/compute-sanitizer data becomes essential.
