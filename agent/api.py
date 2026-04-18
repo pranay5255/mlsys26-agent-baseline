@@ -14,14 +14,28 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_TITLE = "mlsys26-cute-dsl-agent"
+OPENAI_FALLBACK_DEFAULT_MODEL = "gpt-4o"
+EXHAUSTION_STATUS_CODES = {402, 429, 502, 503}
+EXHAUSTION_KEYWORDS = (
+    "insufficient",
+    "exhaust",
+    "quota",
+    "rate limit",
+    "rate-limit",
+    "credit",
+    "out of funds",
+)
 
 
-@dataclass(frozen=True)
+@dataclass
 class InferenceServer:
     """Small wrapper that keeps provider metadata with the SDK client."""
 
     api_type: str
     client: Any
+    fallback_client: Any = None
+    fallback_model: str | None = None
+    _primary_exhausted: bool = False
 
 
 def _load_dotenv() -> None:
@@ -83,13 +97,33 @@ def create_inference_server(api_type: str):
         if title:
             default_headers["X-Title"] = title
 
+        primary_client = openai.OpenAI(
+            api_key=_require_env(["OPENROUTER_API_KEY"], api_type),
+            base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
+            default_headers=default_headers,
+        )
+
+        fallback_client = None
+        fallback_model = None
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            fallback_client = openai.OpenAI(
+                api_key=openai_key,
+                base_url=os.environ.get("OPENAI_BASE_URL"),
+            )
+            fallback_model = os.environ.get(
+                "OPENAI_FALLBACK_MODEL", OPENAI_FALLBACK_DEFAULT_MODEL
+            )
+            logger.info(
+                "OpenAI fallback enabled for OpenRouter exhaustion (model=%s).",
+                fallback_model,
+            )
+
         return InferenceServer(
             api_type=api_type,
-            client=openai.OpenAI(
-                api_key=_require_env(["OPENROUTER_API_KEY"], api_type),
-                base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
-                default_headers=default_headers,
-            ),
+            client=primary_client,
+            fallback_client=fallback_client,
+            fallback_model=fallback_model,
         )
     elif api_type in ("claude", "anthropic"):
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -102,6 +136,18 @@ def create_inference_server(api_type: str):
         )
     else:
         raise ValueError(f"Unsupported api_type: {api_type}")
+
+
+def _is_exhaustion_error(exc: Exception) -> bool:
+    """Return True when the provider signals credit/rate exhaustion."""
+    for attr_owner in (exc, getattr(exc, "response", None)):
+        if attr_owner is None:
+            continue
+        status = getattr(attr_owner, "status_code", None)
+        if status in EXHAUSTION_STATUS_CODES:
+            return True
+    msg = str(exc).lower()
+    return any(keyword in msg for keyword in EXHAUSTION_KEYWORDS)
 
 
 def _query_openai(client, model_name, prompt, max_completion_tokens, **kwargs):
@@ -149,6 +195,8 @@ def query_inference_server(
     kwargs.setdefault("temperature", 1.0)
     api_type = getattr(server, "api_type", None)
     client = getattr(server, "client", server)
+    fallback_client = getattr(server, "fallback_client", None)
+    fallback_model = getattr(server, "fallback_model", None)
     is_anthropic = api_type in ("claude", "anthropic") or isinstance(
         client, anthropic.Anthropic
     )
@@ -157,10 +205,48 @@ def query_inference_server(
     else:
         query_fn = _query_anthropic if is_anthropic else _query_openai
 
+    primary_exhausted = getattr(server, "_primary_exhausted", False)
+
     for attempt in range(retry_times):
         try:
+            if primary_exhausted and fallback_client is not None:
+                return _query_openai(
+                    fallback_client,
+                    fallback_model,
+                    prompt,
+                    max_completion_tokens,
+                    **kwargs,
+                )
             return query_fn(client, model_name, prompt, max_completion_tokens, **kwargs)
         except Exception as e:
+            if (
+                not primary_exhausted
+                and fallback_client is not None
+                and _is_exhaustion_error(e)
+            ):
+                logger.warning(
+                    "Primary provider '%s' exhausted (%s); falling back to OpenAI "
+                    "(model=%s).",
+                    api_type,
+                    e,
+                    fallback_model,
+                )
+                try:
+                    result = _query_openai(
+                        fallback_client,
+                        fallback_model,
+                        prompt,
+                        max_completion_tokens,
+                        **kwargs,
+                    )
+                except Exception as fallback_exc:
+                    logger.warning("OpenAI fallback failed: %s", fallback_exc)
+                    e = fallback_exc
+                else:
+                    if hasattr(server, "_primary_exhausted"):
+                        server._primary_exhausted = True
+                    return result
+
             logger.warning(
                 f"API call failed (attempt {attempt + 1}/{retry_times}): {e}"
             )
