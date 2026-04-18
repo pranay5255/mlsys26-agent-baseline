@@ -1,7 +1,8 @@
 """
-Kernel evaluation using flashinfer-bench Python API directly.
+CuTe DSL solution evaluation using flashinfer-bench Python API directly.
 """
 
+import functools
 import json
 import logging
 import uuid
@@ -17,11 +18,19 @@ from flashinfer_bench.data import (
 )
 from pydantic import BaseModel
 
+from agent.utils import prepare_cute_source_for_eval
+
 logger = logging.getLogger(__name__)
+
+DEFAULT_EVAL_TIMEOUT_SECONDS = 180
+DEFAULT_WARMUP_RUNS = 3
+DEFAULT_BENCHMARK_ITERATIONS = 5
+DEFAULT_BENCHMARK_TRIALS = 1
+CUTE_DSL_DEPENDENCIES = ["nvidia-cutlass-dsl"]
 
 
 class EvalResult(BaseModel):
-    """Result of evaluating a single kernel."""
+    """Result of evaluating a single generated solution."""
 
     compiled: bool = False
     correct: bool = False
@@ -63,7 +72,13 @@ def read_metrics(metrics_path: str, full: bool = False):
 
 
 def create_eval_fn(
-    backend: str = "local", dataset_name: str = "mlsys26-contest", remote_fn=None
+    backend: str = "local",
+    dataset_name: str = "mlsys26-contest",
+    remote_fn=None,
+    timeout: int = DEFAULT_EVAL_TIMEOUT_SECONDS,
+    warmup_runs: int = DEFAULT_WARMUP_RUNS,
+    iterations: int = DEFAULT_BENCHMARK_ITERATIONS,
+    num_trials: int = DEFAULT_BENCHMARK_TRIALS,
 ):
     """Factory to create eval function based on backend.
 
@@ -76,16 +91,33 @@ def create_eval_fn(
         Callable with same signature as eval_kernel.
     """
     if backend == "local":
-        return eval_kernel
+        return functools.partial(
+            eval_kernel,
+            timeout=timeout,
+            warmup_runs=warmup_runs,
+            iterations=iterations,
+            num_trials=num_trials,
+        )
     elif backend == "modal":
         if remote_fn is None:
             raise ValueError("remote_fn is required for modal backend")
 
-        def _modal_eval(
-            kernel_code, task_id, dataset_root, backend="triton", timeout=60
-        ):
+        def _modal_eval(kernel_code, task_id, dataset_root):
+            kernel_code, source_issues = prepare_cute_source_for_eval(kernel_code)
+            if source_issues:
+                return EvalResult(
+                    compiled=False,
+                    task_id=task_id,
+                    error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+                )
             result_dict = remote_fn.remote(
-                kernel_code, task_id, dataset_name, backend, timeout
+                kernel_code,
+                task_id,
+                dataset_name,
+                timeout,
+                warmup_runs,
+                iterations,
+                num_trials,
             )
             return EvalResult(**result_dict)
 
@@ -98,38 +130,43 @@ def eval_kernel(
     kernel_code: str,
     task_id: str,
     dataset_root: str,
-    backend: str = "triton",
-    timeout: int = 60,
+    timeout: int = DEFAULT_EVAL_TIMEOUT_SECONDS,
+    warmup_runs: int = DEFAULT_WARMUP_RUNS,
+    iterations: int = DEFAULT_BENCHMARK_ITERATIONS,
+    num_trials: int = DEFAULT_BENCHMARK_TRIALS,
 ) -> EvalResult:
     """
-    Evaluate a kernel against the reference using flashinfer-bench API.
+    Evaluate a CuTe DSL Python solution against the reference.
 
     Args:
-        kernel_code: Source code of the kernel to evaluate.
+        kernel_code: Source code of the solution to evaluate.
         task_id: Definition/problem name (e.g. "moe_fp8_block_scale_...").
         dataset_root: Path to the dataset root directory.
-        backend: "triton" or "cuda".
         timeout: Timeout in seconds per solution evaluation.
 
     Returns:
         EvalResult with compiled, correct, speedup, latency_ms, etc.
     """
+    kernel_code, source_issues = prepare_cute_source_for_eval(kernel_code)
+    if source_issues:
+        return EvalResult(
+            compiled=False,
+            task_id=task_id,
+            error="STATIC_CUTE_SOURCE_ERROR: " + " | ".join(source_issues),
+        )
     trace_set = TraceSet.from_path(dataset_root)
 
     solution_name = f"agent_{uuid.uuid4().hex[:8]}"
-    language = (
-        SupportedLanguages.TRITON if backend == "triton" else SupportedLanguages.CUDA
-    )
 
     solution = Solution(
         name=solution_name,
         definition=task_id,
         author="agent",
         spec=BuildSpec(
-            language=language,
+            language=SupportedLanguages.PYTHON,
             target_hardware=["cuda"],
             entry_point="main.py::run",
-            dependencies=[],
+            dependencies=CUTE_DSL_DEPENDENCIES,
             destination_passing_style=False,
         ),
         sources=[SourceFile(path="main.py", content=kernel_code)],
@@ -140,9 +177,9 @@ def eval_kernel(
     trace_set._solution_by_name[solution_name] = solution
 
     config = BenchmarkConfig(
-        warmup_runs=3,
-        iterations=5,
-        num_trials=1,
+        warmup_runs=warmup_runs,
+        iterations=iterations,
+        num_trials=num_trials,
         definitions=[task_id],
         solutions=[solution_name],
         timeout_seconds=timeout,
