@@ -142,6 +142,42 @@ CUTE_SOURCE_FORBIDDEN_PATTERNS = {
         "avoid direct shared-memory helpers unless using documented nvgpu/CuTe "
         "memory APIs correctly."
     ),
+    "cute.StaticBuffer": (
+        "cute.StaticBuffer does not exist in this CuTe DSL version; "
+        "use standard CuTe tensor/layout APIs for shared memory tiles."
+    ),
+    "cute.alloc_shared": (
+        "cute.alloc_shared does not exist in this CuTe DSL version; "
+        "use documented CuTe tensor/layout or nvgpu memory APIs."
+    ),
+    "cute.arch.ld_global": (
+        "cute.arch.ld_global* helpers do not exist in this CuTe DSL version; "
+        "use CuTe tensor indexing for global memory access."
+    ),
+    "cute.arch.st_global": (
+        "cute.arch.st_global* helpers do not exist in this CuTe DSL version; "
+        "use CuTe tensor indexing for global memory stores."
+    ),
+    "cute.range_dynamic": (
+        "cute.range_dynamic does not exist; use Python range() for static "
+        "loops or CuTe DSL loop constructs."
+    ),
+    "cute.tensor_view": (
+        "cute.tensor_view does not exist; use from_dlpack to convert "
+        "torch tensors to CuTe tensors."
+    ),
+    "cute.maximum": (
+        "cute.maximum does not exist in CuTe DSL; use Python max() for "
+        "host code or implement element-wise max in kernel logic."
+    ),
+    "cute.make_shape": (
+        "cute.make_shape does not exist; use Python tuples for grid/block "
+        "dimensions and CuTe layout APIs for tensor shapes."
+    ),
+    "cute.make_layout": (
+        "cute.make_layout does not exist; use CuTe layout APIs from the "
+        "documented cutlass.cute namespace."
+    ),
 }
 
 CUTE_SOURCE_FORBIDDEN_REGEXES = {
@@ -169,9 +205,65 @@ def extract_first_code(output_string: str, code_language_types: list[str]) -> st
     return output_string
 
 
+def _strip_cute_type_annotations(source: str) -> str:
+    """Remove Python type annotations from @cute.kernel and @cute.jit function params.
+
+    CuTe DSL passes MLIR-wrapped types (e.g. Int32) at compile time.  If the
+    function signature carries a Python annotation like ``num_tokens: int``,
+    the DSL runtime raises ``DSLRuntimeError: expects argument … to be
+    <class 'int'>, but got Int32``.  Stripping annotations avoids this.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    # Collect line ranges of parameters to fix (1-indexed)
+    lines = source.splitlines(keepends=True)
+
+    def _is_cute_decorated(node: ast.FunctionDef) -> bool:
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Attribute) and isinstance(dec.value, ast.Name):
+                if dec.value.id == "cute" and dec.attr in ("kernel", "jit"):
+                    return True
+        return False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _is_cute_decorated(node):
+            continue
+        for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+            if arg.annotation is not None:
+                # Remove `: <type>` from the parameter line
+                lineno = arg.lineno - 1  # 0-indexed
+                line = lines[lineno]
+                # Replace `param_name: type_name` with `param_name`
+                lines[lineno] = re.sub(
+                    rf"\b{re.escape(arg.arg)}\s*:\s*\w+", arg.arg, line
+                )
+        # Also strip return annotation (may be on a different line than def)
+        if node.returns is not None:
+            ret_lineno = node.returns.lineno - 1
+            lines[ret_lineno] = re.sub(r"\)\s*->.*?:", "):", lines[ret_lineno])
+
+    return "".join(lines)
+
+
 def normalize_cute_source(source: str) -> str:
     """Normalize common CuTe DSL import/stream mistakes in generated code."""
-    normalized = source
+    # Strip any XML edit/reasoning tags that leaked from LLM output.
+    # Remove reasoning blocks entirely (content is never valid code).
+    normalized = re.sub(
+        r"<reasoning_\d+>.*?</reasoning_\d+>\s*", "", source, flags=re.DOTALL
+    )
+    # Remove old_str/new_str tag lines (keep content between them, as it's code).
+    normalized = re.sub(
+        r"</?(?:old_str|new_str)_\d+>[ \t]*\n?", "", normalized
+    )
+    # Strip type annotations from @cute.kernel / @cute.jit functions to avoid
+    # DSL Int32-vs-int mismatches at MLIR compile time.
+    normalized = _strip_cute_type_annotations(normalized)
     for old, new in CUTE_SOURCE_IMPORT_REPLACEMENTS.items():
         normalized = normalized.replace(old, new)
     for old, new in CUTE_SOURCE_API_REPLACEMENTS.items():
@@ -341,21 +433,36 @@ def str_replace(
     return new_file_content
 
 
+def _strip_tag_content(text: str) -> str:
+    """Strip exactly one leading and one trailing newline from tag content."""
+    if text.startswith("\n"):
+        text = text[1:]
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text
+
+
 def extract_edits(output: str):
     """Extract str_replace edits from LLM output."""
     edits = []
+    seen_ids = set()
     for line in output.split("\n"):
         if line.strip().startswith("<old_str_"):
             try:
                 idx = int(line.strip().split("_")[2].split(">")[0])
+                if idx in seen_ids:
+                    continue
+                seen_ids.add(idx)
                 raw_old_str = output.split("<old_str_" + str(idx) + ">")[1].split(
                     "</old_str_" + str(idx) + ">"
                 )[0]
                 raw_new_str = output.split("<new_str_" + str(idx) + ">")[1].split(
                     "</new_str_" + str(idx) + ">"
                 )[0]
-                edits.append((raw_old_str, raw_new_str))
-            except:
+                edits.append(
+                    (_strip_tag_content(raw_old_str), _strip_tag_content(raw_new_str))
+                )
+            except Exception:
                 continue
     return edits
 
