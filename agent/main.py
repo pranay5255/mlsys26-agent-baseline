@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 from agent.api import create_inference_server  # noqa: E402
+from agent.diagnostics import diagnostics_for_metric  # noqa: E402
 from agent.eval import (  # noqa: E402
     DEFAULT_BENCHMARK_ITERATIONS,
     DEFAULT_BENCHMARK_TRIALS,
@@ -100,6 +101,13 @@ def run_agent(args: argparse.Namespace, inference_server, level, problem_id):
         "w",
     ) as f:
         json.dump(best_metrics.model_dump(), f, indent=4)
+    with open(
+        os.path.join(
+            result_save_path, f"global_best_diagnostics_{args.total_steps}.json"
+        ),
+        "w",
+    ) as f:
+        json.dump(diagnostics_for_metric(best_metrics), f, indent=2)
 
     return best_kernel, best_metrics
 
