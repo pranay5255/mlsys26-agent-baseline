@@ -1,5 +1,5 @@
 """
-Remote kernel evaluation on Modal GPU.
+Remote CuTe DSL solution evaluation on Modal GPU.
 
 Usage: set eval_backend="modal" in config or --eval_backend modal on CLI.
 The Modal app is started programmatically via app.run() in main.py,
@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 MODAL_APP_NAME = "flashinfer-bench-agent"
 VOLUME_NAME = "flashinfer-trace"
 DATASET_PATH = "/data"
+CUTE_CACHE_PATH = "/tmp/cute_dsl_cache"
 
 
-def create_modal_app(gpu_type: str = "B200"):
+def create_modal_app(gpu_type: str = "B200", debug: bool = False):
     """Create Modal app, remote eval function, and dataset volume.
 
     Args:
@@ -29,9 +30,28 @@ def create_modal_app(gpu_type: str = "B200"):
     """
     app = modal.App(MODAL_APP_NAME)
 
-    image = modal.Image.from_registry(
-        "nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04", add_python="3.12"
-    ).pip_install("flashinfer-bench", "torch", "triton", "pydantic")
+    env = {"CUTE_DSL_CACHE_DIR": CUTE_CACHE_PATH}
+    if debug:
+        env.update(
+            {
+                "CUTE_DSL_LINEINFO": "1",
+                "CUTE_DSL_LOG_TO_CONSOLE": "1",
+                "CUTE_DSL_LOG_LEVEL": "20",
+            }
+        )
+
+    image = (
+        modal.Image.from_registry(
+            "nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04", add_python="3.11"
+        )
+        .pip_install(
+            "flashinfer-bench",
+            "torch",
+            "pydantic",
+            "nvidia-cutlass-dsl[cu13]",
+        )
+        .env(env)
+    )
 
     dataset_vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
@@ -46,11 +66,60 @@ def create_modal_app(gpu_type: str = "B200"):
         kernel_code: str,
         task_id: str,
         dataset_name: str,
-        backend: str = "triton",
-        timeout: int = 60,
+        timeout: int = 180,
+        warmup_runs: int = 3,
+        iterations: int = 5,
+        num_trials: int = 1,
     ) -> dict:
-        """Evaluate a kernel on Modal GPU. Mirrors eval.eval_kernel() logic."""
+        """Evaluate a CuTe DSL solution on Modal GPU. Mirrors eval.eval_kernel()."""
+        import importlib.metadata
+        import re
         import uuid
+
+        replacements = {
+            "from cutlass.cute import from_dlpack": (
+                "from cutlass.cute.runtime import from_dlpack"
+            ),
+            "from cutlass import from_dlpack": (
+                "from cutlass.cute.runtime import from_dlpack"
+            ),
+            "from cutlass.cuda import default_stream": "",
+            "from cutlass.cute.cuda import default_stream": "",
+            "stream.synchronize()": "cutlass.cuda.stream_sync(stream)",
+        }
+        for old, new in replacements.items():
+            kernel_code = kernel_code.replace(old, new)
+        kernel_code = re.sub(
+            r"(?<![\w.])default_stream\(\)",
+            "cutlass.cuda.default_stream()",
+            kernel_code,
+        )
+        lines = []
+        seen_runtime_dlpack_import = False
+        for line in kernel_code.splitlines():
+            if line == "from cutlass.cute.runtime import from_dlpack":
+                if seen_runtime_dlpack_import:
+                    continue
+                seen_runtime_dlpack_import = True
+            lines.append(line)
+        kernel_code = "\n".join(lines)
+        has_cutlass_import = any(
+            line == "import cutlass" or line.startswith("import cutlass ")
+            for line in lines
+        )
+        if "cutlass.cuda." in kernel_code and not has_cutlass_import:
+            kernel_code = "import cutlass\n" + kernel_code
+
+        try:
+            import cutlass  # noqa: F401
+            import cutlass.cute as cute  # noqa: F401
+            import torch  # noqa: F401
+        except Exception as e:
+            return {
+                "compiled": False,
+                "task_id": task_id,
+                "error": f"CuTe DSL import failed on Modal image: {type(e).__name__}: {e}",
+            }
 
         from flashinfer_bench.bench import Benchmark, BenchmarkConfig
         from flashinfer_bench.data import (
@@ -66,33 +135,40 @@ def create_modal_app(gpu_type: str = "B200"):
         trace_set = TraceSet.from_path(dataset_root)
 
         solution_name = f"agent_{uuid.uuid4().hex[:8]}"
-        language = (
-            SupportedLanguages.TRITON
-            if backend == "triton"
-            else SupportedLanguages.CUDA
-        )
+        try:
+            cutlass_version = importlib.metadata.version("nvidia-cutlass-dsl")
+        except importlib.metadata.PackageNotFoundError:
+            cutlass_version = "unknown"
 
         solution = Solution(
             name=solution_name,
             definition=task_id,
             author="agent",
             spec=BuildSpec(
-                language=language,
+                language=SupportedLanguages.PYTHON,
                 target_hardware=["cuda"],
                 entry_point="main.py::run",
-                dependencies=[],
+                dependencies=["nvidia-cutlass-dsl"],
                 destination_passing_style=False,
             ),
-            sources=[SourceFile(path="main.py", content=kernel_code)],
+            sources=[
+                SourceFile(
+                    path="main.py",
+                    content=(
+                        f"# Evaluated on Modal {gpu_type} with nvidia-cutlass-dsl "
+                        f"{cutlass_version}\n" + kernel_code
+                    ),
+                )
+            ],
         )
 
         trace_set.solutions.setdefault(task_id, []).append(solution)
         trace_set._solution_by_name[solution_name] = solution
 
         config = BenchmarkConfig(
-            warmup_runs=3,
-            iterations=5,
-            num_trials=1,
+            warmup_runs=warmup_runs,
+            iterations=iterations,
+            num_trials=num_trials,
             definitions=[task_id],
             solutions=[solution_name],
             timeout_seconds=timeout,
@@ -158,22 +234,20 @@ def create_modal_app(gpu_type: str = "B200"):
 def ensure_dataset_synced(
     dataset_vol: modal.Volume, local_dataset_root: str, dataset_name: str
 ):
-    """Ensure local dataset is uploaded to Modal Volume via batch_upload."""
+    """Ensure benchmark dataset payload is uploaded to Modal Volume."""
     if not os.path.isdir(local_dataset_root):
         raise FileNotFoundError(
             f"Local dataset root does not exist or is not a directory: {local_dataset_root}"
         )
 
-    try:
-        if dataset_vol.listdir(f"/{dataset_name}"):
-            logger.info(
-                f"Dataset '{dataset_name}' found in Modal Volume, skipping upload"
-            )
-            return
-    except Exception:
-        pass
+    logger.info(f"Syncing dataset '{dataset_name}' to Modal Volume...")
+    with dataset_vol.batch_upload(force=True) as batch:
+        for dirname in ("definitions", "workloads", "blob", "solutions"):
+            local_path = os.path.join(local_dataset_root, dirname)
+            if os.path.isdir(local_path):
+                batch.put_directory(local_path, f"/{dataset_name}/{dirname}")
 
-    logger.info(f"Uploading dataset '{dataset_name}' to Modal Volume...")
-    with dataset_vol.batch_upload() as batch:
-        batch.put_directory(local_dataset_root, f"/{dataset_name}")
-    logger.info(f"Dataset uploaded to Modal Volume '{VOLUME_NAME}'")
+        readme_path = os.path.join(local_dataset_root, "README.md")
+        if os.path.isfile(readme_path):
+            batch.put_file(readme_path, f"/{dataset_name}/README.md")
+    logger.info(f"Dataset synced to Modal Volume '{VOLUME_NAME}'")
