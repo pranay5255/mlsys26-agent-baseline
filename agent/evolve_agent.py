@@ -9,6 +9,7 @@ import shutil
 import numpy as np
 from tqdm import tqdm
 
+from agent.diagnostics import diagnostics_for_metric
 from agent.eval import EvalResult, calculate_score
 from agent.iterative_agent import propose_step, run_iterative_loop
 
@@ -91,7 +92,13 @@ def copy_evolve_step_files(src_path: str, dst_path: str, max_step: int = 0):
     os.makedirs(dst_path, exist_ok=True)
 
     for step_idx in range(1, max_step + 1):
-        for suffix in (".py", ".txt", "_metrics.json", "_log.json"):
+        for suffix in (
+            ".py",
+            ".txt",
+            "_metrics.json",
+            "_diagnostics.json",
+            "_log.json",
+        ):
             src_file = os.path.join(src_path, f"proposal_{step_idx}{suffix}")
             if os.path.exists(src_file):
                 dst_file = os.path.join(dst_path, f"proposal_{step_idx}{suffix}")
@@ -220,6 +227,10 @@ def run_evolve_loop(
                 f.write(logs["proposal_kernel"])
             with open(os.path.join(log_path, f"proposal_{i+1}_metrics.json"), "w") as f:
                 json.dump(logs["proposal_metrics"].model_dump(), f)
+            with open(
+                os.path.join(log_path, f"proposal_{i+1}_diagnostics.json"), "w"
+            ) as f:
+                json.dump(diagnostics_for_metric(logs["proposal_metrics"]), f, indent=2)
 
             step_log = {
                 "step": i + 1,
